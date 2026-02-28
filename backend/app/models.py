@@ -19,8 +19,11 @@ class Location(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
+    area_id: Mapped[int | None] = mapped_column(ForeignKey("areas.id"), nullable=True, index=True)
     code: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="ACTIVE")
+    binding_status: Mapped[str] = mapped_column(String(32), default="UNBOUND")
 
     warehouse: Mapped[Warehouse] = relationship(back_populates="locations")
 
@@ -60,9 +63,10 @@ class Order(Base):
     order_type: Mapped[str] = mapped_column(String(16))  # inbound | outbound
     status: Mapped[str] = mapped_column(String(32), default="CREATED")
     partner: Mapped[str] = mapped_column(String(128), default="")
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_location_id: Mapped[int | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
     target_location_id: Mapped[int | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class OrderLine(Base):
@@ -91,8 +95,82 @@ class StockMove(Base):
     to_location_id: Mapped[int | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
     qty: Mapped[int] = mapped_column(Integer)
     move_type: Mapped[str] = mapped_column(String(32))
+    operator: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ref_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class OperationLog(Base):
+    __tablename__ = "operation_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    module: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(64))
+    entity: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    detail: Mapped[str] = mapped_column(String(512), default="")
+    operator: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class Factory(Base):
+    __tablename__ = "factories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    location: Mapped[str] = mapped_column(String(128), default="")
+    description: Mapped[str] = mapped_column(String(256), default="")
+    factory_type: Mapped[str] = mapped_column(String(64), default="GENERAL")
+    status: Mapped[str] = mapped_column(String(32), default="ACTIVE")
+
+
+class Area(Base):
+    __tablename__ = "areas"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    material_type: Mapped[str] = mapped_column(String(64), default="GENERAL")
+    factory_id: Mapped[int | None] = mapped_column(ForeignKey("factories.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="ACTIVE")
+    description: Mapped[str] = mapped_column(String(256), default="")
+
+
+class Container(Base):
+    __tablename__ = "containers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    container_type: Mapped[str] = mapped_column(String(64), default="BIN")
+    status: Mapped[str] = mapped_column(String(32), default="UNBOUND")
+    location_id: Mapped[int | None] = mapped_column(ForeignKey("locations.id"), nullable=True, unique=True, index=True)
+    description: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class ContainerInventory(Base):
+    __tablename__ = "container_inventory"
+    __table_args__ = (UniqueConstraint("container_id", "material_id", name="uq_container_material"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    container_id: Mapped[int] = mapped_column(ForeignKey("containers.id"), index=True)
+    material_id: Mapped[int] = mapped_column(ForeignKey("materials.id"), index=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    reserved: Mapped[int] = mapped_column(Integer, default=0)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class ContainerMove(Base):
+    __tablename__ = "container_moves"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    container_id: Mapped[int] = mapped_column(ForeignKey("containers.id"), index=True)
+    from_location_id: Mapped[int | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
+    to_location_id: Mapped[int | None] = mapped_column(ForeignKey("locations.id"), nullable=True)
+    operator: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
 class User(Base):

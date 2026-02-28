@@ -11,7 +11,15 @@ type Material = {
   is_active: number;
 };
 
-type Location = { id: number; code: string; name: string; warehouse_id: number };
+type Location = {
+  id: number;
+  code: string;
+  name: string;
+  warehouse_id: number;
+  area_id?: number | null;
+  status?: string;
+  binding_status?: string;
+};
 
 type Inventory = {
   id: number;
@@ -28,13 +36,25 @@ type Order = {
   order_type: string;
   status: string;
   partner?: string;
+  created_by?: string | null;
+  created_at?: string;
   source_location_id?: number | null;
   target_location_id?: number | null;
 };
 
 type OrderLine = { id: number; material_id: number; material_name?: string | null; material_sku?: string | null; qty: number; reserved_qty: number; picked_qty: number; packed_qty: number };
 
-type StockMove = { id: number; material_id: number; qty: number; move_type: string; from_location_id: number | null; to_location_id: number | null };
+type StockMove = {
+  id: number;
+  material_id: number;
+  qty: number;
+  move_type: string;
+  from_location_id: number | null;
+  to_location_id: number | null;
+  operator: string | null;
+  created_at: string;
+};
+type OperationLog = { id: number; module: string; action: string; entity: string; entity_id: number | null; detail: string; operator: string | null; created_at: string };
 
 type WmsData = {
   materials: Material[];
@@ -42,6 +62,7 @@ type WmsData = {
   inventory: Inventory[];
   orders: Order[];
   stockMoves: StockMove[];
+  operationLogs: OperationLog[];
   loading: boolean;
   error: string | null;
   refreshAll: (includeInactive?: number, permissions?: string[]) => Promise<void>;
@@ -56,6 +77,7 @@ export function useWmsData(): WmsData {
   const [inventory, setInventory] = useState<Inventory[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [stockMoves, setStockMoves] = useState<StockMove[]>([]);
+  const [operationLogs, setOperationLogs] = useState<OperationLog[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,23 +94,24 @@ export function useWmsData(): WmsData {
       };
 
       pushOrEmpty(permissions.includes("materials.read"), () => api.listMaterials(includeInactive));
-      pushOrEmpty(permissions.includes("materials.read"), () => api.listLocations());
+      pushOrEmpty(permissions.includes("materials.read") || permissions.includes("locations.read"), () => api.listLocations());
       pushOrEmpty(permissions.includes("inventory.read"), () => api.listInventory());
       pushOrEmpty(permissions.includes("orders.read"), () => api.listOrders());
       pushOrEmpty(permissions.includes("stock_moves.read"), () => api.listStockMoves());
+      pushOrEmpty(permissions.includes("stock_moves.read"), () => api.listOperationLogs());
 
-      const [m, l, i, o, s] = await Promise.all(tasks);
+      const [m, l, i, o, s, logs] = await Promise.all(tasks);
 
       if (permissions.includes("materials.read")) {
         setMaterials(m as Material[]);
-        setLocations(l as Location[]);
       } else {
         setMaterials([]);
-        setLocations([]);
       }
+      setLocations((permissions.includes("materials.read") || permissions.includes("locations.read")) ? (l as Location[]) : []);
       setInventory(permissions.includes("inventory.read") ? (i as Inventory[]) : []);
       setOrders(permissions.includes("orders.read") ? (o as Order[]) : []);
       setStockMoves(permissions.includes("stock_moves.read") ? (s as StockMove[]) : []);
+      setOperationLogs(permissions.includes("stock_moves.read") ? (logs as OperationLog[]) : []);
     } catch (err) {
       setError((err as Error).message || "Request failed");
     } finally {
@@ -107,6 +130,7 @@ export function useWmsData(): WmsData {
     inventory,
     orders,
     stockMoves,
+    operationLogs,
     loading,
     error,
     refreshAll,
@@ -116,4 +140,4 @@ export function useWmsData(): WmsData {
   };
 }
 
-export type { Material, Location, Inventory, Order, OrderLine, StockMove };
+export type { Material, Location, Inventory, Order, OrderLine, StockMove, OperationLog };

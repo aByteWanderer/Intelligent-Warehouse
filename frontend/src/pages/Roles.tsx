@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import FieldLabel from "../components/FieldLabel";
+import FormModal from "../components/FormModal";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 const PERM_GROUPS: { title: string; match: (code: string) => boolean }[] = [
   { title: "物料", match: (code) => code.startsWith("materials.") },
   { title: "库存", match: (code) => code.startsWith("inventory.") || code.startsWith("stock_moves.") },
   { title: "订单/出入库", match: (code) => code.startsWith("orders.") || code.startsWith("inbound.") || code.startsWith("outbound.") },
+  { title: "库位/区域/容器", match: (code) => code.startsWith("locations.") || code.startsWith("areas.") || code.startsWith("containers.") || code.startsWith("container_moves.") },
   { title: "用户与角色", match: (code) => code.startsWith("users.") || code.startsWith("roles.") },
   { title: "系统", match: (code) => code.startsWith("system.") }
 ];
@@ -15,6 +20,8 @@ export default function RolesPage({ can }: { can: (perm: string) => boolean }) {
   const [form, setForm] = useState({ name: "", description: "", permission_codes: [] as string[] });
   const [editingId, setEditingId] = useState<number | null>(null);
   const [edit, setEdit] = useState({ description: "", permission_codes: [] as string[] });
+  const [showCreate, setShowCreate] = useState(false);
+  const { toast, showToast } = useToast();
 
   async function load() {
     const [r, p] = await Promise.all([api.listRoles(), api.listPermissions()]);
@@ -73,62 +80,98 @@ export default function RolesPage({ can }: { can: (perm: string) => boolean }) {
   );
 
   return (
-    <section className="grid">
-      {can("roles.write") && (
-        <div className="card">
-          <h2>新增角色</h2>
+    <section className="card">
+      <div className="title-row">
+        <h2>角色管理</h2>
+        {can("roles.write") && <button className="primary" onClick={() => setShowCreate(true)}>新增角色</button>}
+      </div>
+
+      <Toast toast={toast} />
+
+      {showCreate && (
+        <FormModal title="新增角色" onClose={() => setShowCreate(false)}>
           <div className="form">
-            <input placeholder="角色名" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            <input placeholder="描述" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            <FieldLabel text="角色名称" />
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <FieldLabel text="描述" />
+            <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            <FieldLabel text="权限" />
             {renderPermCheckboxes(form.permission_codes, (next) => setForm({ ...form, permission_codes: next }))}
-            <button className="primary" onClick={async () => { await api.createRole(form); await load(); }}>
+            <button className="primary" onClick={async () => {
+              try {
+                await api.createRole(form);
+                setForm({ name: "", description: "", permission_codes: [] });
+                setShowCreate(false);
+                await load();
+                showToast("success", "角色创建成功");
+              } catch (e) {
+                showToast("error", (e as Error).message || "角色创建失败");
+              }
+            }}>
               创建角色
             </button>
           </div>
-        </div>
+        </FormModal>
       )}
 
-      <div className="card">
-        <h2>角色列表</h2>
-        <div className="list">
-          {roles.map((r) => (
-            <div key={r.id} className="rowline">
-              {editingId === r.id ? (
-                <div className="form">
-                  <input value={edit.description} onChange={(e) => setEdit({ ...edit, description: e.target.value })} />
-                  {renderPermCheckboxes(edit.permission_codes, (next) => setEdit({ ...edit, permission_codes: next }))}
-                </div>
-              ) : (
-                <div>
-                  <div>{r.name} | {r.description}</div>
-                  <div className="lines">权限: {(r.permissions || []).map((code: string) => permLabel(code)).join(", ")}</div>
-                </div>
-              )}
-              {can("roles.write") && (
-                <div className="row">
-                  {editingId === r.id ? (
-                    <>
-                      <button className="primary" onClick={async () => { await api.updateRole(r.id, edit); setEditingId(null); await load(); }}>
-                        保存
-                      </button>
-                      <button onClick={() => setEditingId(null)}>取消</button>
-                    </>
-                  ) : (
-                    <button onClick={() => { setEditingId(r.id); setEdit({ description: r.description ?? "", permission_codes: r.permissions || [] }); }}>编辑</button>
-                  )}
-                  <button onClick={async () => {
-                    const ok = window.confirm(`删除角色 ${r.name}?`);
-                    if (!ok) return;
-                    await api.deleteRole(r.id);
-                    await load();
-                  }}>
-                    删除
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
+      <div className="table table-4">
+        <div className="thead">
+          <span>角色名称</span>
+          <span>描述</span>
+          <span>权限</span>
+          <span>操作</span>
         </div>
+        {roles.map((role) => (
+          <div key={role.id} className="rowline">
+            <span>{role.name}</span>
+            <span>{editingId === role.id ? <input value={edit.description} onChange={(e) => setEdit({ ...edit, description: e.target.value })} /> : (role.description || "-")}</span>
+            <span title={(role.permissions || []).map((code: string) => permLabel(code)).join(";")}>
+              {(role.permissions || []).map((code: string) => permLabel(code)).join(";") || "-"}
+            </span>
+            <span className="row">
+              {can("roles.write") && (editingId === role.id ? (
+                <>
+                  <button className="primary" onClick={async () => {
+                    try {
+                      await api.updateRole(role.id, edit);
+                      setEditingId(null);
+                      await load();
+                      showToast("success", "角色更新成功");
+                    } catch (e) {
+                      showToast("error", (e as Error).message || "角色更新失败");
+                    }
+                  }}>保存</button>
+                  <button onClick={() => setEditingId(null)}>取消</button>
+                </>
+              ) : (
+                <button onClick={() => {
+                  setEditingId(role.id);
+                  setEdit({
+                    description: role.description || "",
+                    permission_codes: role.permissions || []
+                  });
+                }}>编辑</button>
+              ))}
+              {can("roles.write") && (
+                <button onClick={async () => {
+                  try {
+                    await api.deleteRole(role.id);
+                    await load();
+                    showToast("success", "角色删除成功");
+                  } catch (e) {
+                    showToast("error", (e as Error).message || "角色删除失败");
+                  }
+                }}>删除</button>
+              )}
+            </span>
+            {editingId === role.id && (
+              <div className="lines">
+                <div>权限调整:</div>
+                {renderPermCheckboxes(edit.permission_codes, (next) => setEdit({ ...edit, permission_codes: next }))}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
     </section>
   );

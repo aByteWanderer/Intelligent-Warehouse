@@ -14,6 +14,7 @@ import DocsPage from "./pages/Docs";
 import LoginPage from "./pages/Login";
 import UsersPage from "./pages/Users";
 import RolesPage from "./pages/Roles";
+import StoragePage from "./pages/Storage";
 
 function getHashPath() {
   const hash = window.location.hash || "#/";
@@ -74,6 +75,7 @@ export default function App() {
     if (can("materials.read")) items.push({ path: "/materials", label: "物料" });
     if (can("inventory.read")) items.push({ path: "/inventory", label: "库存" });
     if (can("orders.read")) items.push({ path: "/inbound", label: "入库" }, { path: "/outbound", label: "出库" }, { path: "/orders", label: "订单" });
+    if (can("locations.read") || can("areas.read") || can("containers.read")) items.push({ path: "/storage", label: "库位管理" });
     if (can("stock_moves.read")) items.push({ path: "/records", label: "记录" });
     if (can("users.read")) items.push({ path: "/users", label: "用户" });
     if (can("roles.read")) items.push({ path: "/roles", label: "角色" });
@@ -162,7 +164,12 @@ export default function App() {
     if (path === "/records") {
       if (!can("stock_moves.read")) return <section className="card">无权限访问记录</section>;
       return (
-        <RecordsPage stockMoves={data.stockMoves} materialName={matName} locationName={locName} />
+        <RecordsPage
+          stockMoves={data.stockMoves}
+          operationLogs={data.operationLogs}
+          materialName={matName}
+          locationName={locName}
+        />
       );
     }
     if (path === "/users") {
@@ -172,6 +179,10 @@ export default function App() {
     if (path === "/roles") {
       if (!can("roles.read")) return <section className="card">无权限访问角色</section>;
       return <RolesPage can={can} />;
+    }
+    if (path === "/storage") {
+      if (!(can("locations.read") || can("areas.read") || can("containers.read"))) return <section className="card">无权限访问库位管理</section>;
+      return <StoragePage locations={data.locations} materials={data.materials} can={can} onRefresh={() => data.refreshAll(includeInactive ? 1 : 0, permissions)} />;
     }
     if (path === "/docs") return <DocsPage />;
     return (

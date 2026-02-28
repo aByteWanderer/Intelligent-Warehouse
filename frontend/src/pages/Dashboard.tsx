@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Inventory, Material, Order, StockMove } from "../hooks/useWmsData";
+import { formatDateTime } from "../utils/time";
 
 export default function Dashboard({
   materials,
@@ -61,21 +62,25 @@ export default function Dashboard({
 
       <div className="card">
         <h2>最新库存流水</h2>
-        <div className="table table-5">
+        <div className="table table-7">
           <div className="thead">
             <span>类型</span>
             <span>物料</span>
             <span>数量</span>
             <span>From</span>
             <span>To</span>
+            <span>操作人</span>
+            <span>时间</span>
           </div>
           {stockMoves.slice(0, 6).map((m) => (
             <div key={m.id} className="rowline">
-              <span>{m.move_type}</span>
-              <span>{materialName(m.material_id)}</span>
+              <span title={m.move_type}>{m.move_type}</span>
+              <span title={materialName(m.material_id)}>{materialName(m.material_id)}</span>
               <span>{m.qty}</span>
-              <span>{locationName(m.from_location_id)}</span>
-              <span>{locationName(m.to_location_id)}</span>
+              <span title={locationName(m.from_location_id)}>{locationName(m.from_location_id)}</span>
+              <span title={locationName(m.to_location_id)}>{locationName(m.to_location_id)}</span>
+              <span title={m.operator || "-"}>{m.operator || "-"}</span>
+              <span title={m.created_at}>{formatDateTime(m.created_at)}</span>
             </div>
           ))}
         </div>
