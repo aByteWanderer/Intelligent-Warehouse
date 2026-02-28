@@ -6,10 +6,16 @@ class WarehouseCreate(BaseModel):
     name: str
 
 
+class WarehouseUpdate(BaseModel):
+    name: str | None = None
+
+
 class LocationCreate(BaseModel):
     warehouse_id: int
+    area_id: int = Field(..., gt=0)
     code: str
     name: str
+    status: str = Field("ACTIVE", pattern="^(ACTIVE|DISABLED)$")
 
 
 class MaterialCreate(BaseModel):
@@ -34,29 +40,29 @@ class MaterialCommonUpdate(BaseModel):
 
 
 class InventoryAdjust(BaseModel):
-    material_id: int
-    location_id: int
+    material_id: int = Field(..., gt=0)
+    location_id: int = Field(..., gt=0)
     delta: int
     reason: str = "manual"
 
 
 class OrderLineCreate(BaseModel):
-    material_id: int
-    qty: int
+    material_id: int = Field(..., gt=0)
+    qty: int = Field(..., gt=0)
 
 
 class InboundCreate(BaseModel):
-    order_no: str
+    order_no: str = Field(..., min_length=1, max_length=64)
     supplier: str = ""
-    location_id: int
+    location_id: int = Field(..., gt=0)
     lines: list[OrderLineCreate]
 
 
 class OutboundCreate(BaseModel):
-    order_no: str
+    order_no: str = Field(..., min_length=1, max_length=64)
     customer: str = ""
-    source_location_id: int
-    staging_location_id: int | None = None
+    source_location_id: int = Field(..., gt=0)
+    staging_location_id: int | None = Field(default=None, gt=0)
     lines: list[OrderLineCreate]
 
 
@@ -65,7 +71,7 @@ class OutboundReserve(BaseModel):
 
 
 class OutboundPick(BaseModel):
-    staging_location_id: int
+    staging_location_id: int = Field(..., gt=0)
 
 
 class OutboundPack(BaseModel):
@@ -103,3 +109,72 @@ class RoleCreate(BaseModel):
 class RoleUpdate(BaseModel):
     description: str | None = None
     permission_codes: list[str] | None = None
+
+
+class FactoryCreate(BaseModel):
+    code: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=128)
+    location: str = ""
+    description: str = ""
+    factory_type: str = "GENERAL"
+    status: str = Field("ACTIVE", pattern="^(ACTIVE|DISABLED)$")
+
+
+class FactoryUpdate(BaseModel):
+    name: str | None = None
+    location: str | None = None
+    description: str | None = None
+    factory_type: str | None = None
+    status: str | None = Field(default=None, pattern="^(ACTIVE|DISABLED)$")
+
+
+class AreaCreate(BaseModel):
+    code: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=128)
+    material_type: str = "GENERAL"
+    factory_id: int | None = Field(default=None, gt=0)
+    status: str = Field("ACTIVE", pattern="^(ACTIVE|DISABLED)$")
+    description: str = ""
+
+
+class AreaUpdate(BaseModel):
+    name: str | None = None
+    material_type: str | None = None
+    factory_id: int | None = Field(default=None, gt=0)
+    status: str | None = Field(default=None, pattern="^(ACTIVE|DISABLED)$")
+    description: str | None = None
+
+
+class LocationUpdate(BaseModel):
+    area_id: int | None = Field(default=None, gt=0)
+    name: str | None = None
+    status: str | None = Field(default=None, pattern="^(ACTIVE|DISABLED)$")
+
+
+class ContainerCreate(BaseModel):
+    code: str = Field(..., min_length=1, max_length=64)
+    container_type: str = "BIN"
+    status: str = Field("UNBOUND", pattern="^(BOUND|UNBOUND)$")
+    location_id: int | None = Field(default=None, gt=0)
+    description: str = ""
+
+
+class ContainerUpdate(BaseModel):
+    container_type: str | None = None
+    description: str | None = None
+    status: str | None = Field(default=None, pattern="^(BOUND|UNBOUND)$")
+
+
+class ContainerBind(BaseModel):
+    location_id: int = Field(..., gt=0)
+
+
+class ContainerMove(BaseModel):
+    to_location_id: int = Field(..., gt=0)
+    note: str = ""
+
+
+class ContainerStockAdjust(BaseModel):
+    material_id: int = Field(..., gt=0)
+    delta: int
+    reason: str = "manual"

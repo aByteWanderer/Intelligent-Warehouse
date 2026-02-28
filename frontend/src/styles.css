@@ -35,9 +35,10 @@ body {
 }
 
 .app {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 32px 20px 60px;
+  width: 100%;
+  max-width: 1800px;
+  margin: 0;
+  padding: 24px clamp(16px, 3vw, 48px) 60px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -108,6 +109,21 @@ body[data-theme="light"] .hero {
   border: none;
 }
 
+.subtabs button {
+  text-decoration: none;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 8px 16px;
+  background: transparent;
+}
+
+.subtabs button.active {
+  background: var(--accent);
+  color: #1b1f2a;
+  border: none;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -141,6 +157,11 @@ body[data-theme="light"] .hero {
   margin-bottom: 12px;
 }
 
+.field-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 input, select {
   background: var(--panel-2);
   border: 1px solid var(--border);
@@ -156,12 +177,29 @@ button {
   border-radius: 8px;
   padding: 8px 12px;
   cursor: pointer;
+  transition: all 0.18s ease;
 }
 
 button.primary {
   background: var(--accent);
   color: #1b1f2a;
   border: none;
+}
+
+button:not(:disabled):hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+button.primary:not(:disabled):hover {
+  filter: brightness(1.05);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--muted) 25%, transparent);
+  border-color: color-mix(in srgb, var(--muted) 40%, var(--border));
 }
 
 button.ghost {
@@ -223,6 +261,19 @@ button.ghost {
   background: rgba(28, 34, 52, 0.6);
 }
 
+.rowline > span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowline > span:hover {
+  white-space: normal;
+  word-break: break-word;
+}
+
 body[data-theme="light"] .rowline {
   background: rgba(240, 242, 246, 0.8);
 }
@@ -260,10 +311,31 @@ body[data-theme="light"] .rowline {
   grid-template-columns: repeat(6, 1fr);
 }
 
-.table .rowline span {
+.table.table-7 .thead,
+.table.table-7 .rowline {
+  grid-template-columns: repeat(7, 1fr);
+}
+
+.table.table-8 .thead,
+.table.table-8 .rowline {
+  grid-template-columns: repeat(8, 1fr);
+}
+
+.table .rowline > * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.table .rowline > *:hover {
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 2px 6px;
+  z-index: 2;
 }
 
 .summary {
@@ -284,6 +356,36 @@ body[data-theme="light"] .rowline {
 
 .lines {
   margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.row-detail {
+  grid-column: 1 / -1;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--panel-2) 60%, transparent);
+}
+
+.detail-table {
+  display: grid;
+  gap: 6px;
+}
+
+.detail-head,
+.detail-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.detail-head.detail-2,
+.detail-row.detail-2 {
+  grid-template-columns: 2fr 1fr;
+}
+
+.detail-head {
   color: var(--muted);
   font-size: 12px;
 }
@@ -325,6 +427,45 @@ body[data-theme="light"] .rowline {
   color: var(--muted);
 }
 
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: grid;
+  place-items: center;
+  z-index: 30;
+  padding: 16px;
+}
+
+.modal-card {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.toast {
+  position: fixed;
+  right: 18px;
+  top: 18px;
+  z-index: 40;
+  padding: 10px 14px;
+  border-radius: 8px;
+  color: #fff;
+}
+
+.toast.success {
+  background: #1f8f4e;
+}
+
+.toast.error {
+  background: #c44a4a;
+}
+
 @media (max-width: 900px) {
   .hero {
     flex-direction: column;
@@ -343,6 +484,16 @@ body[data-theme="light"] .rowline {
 
   .table.table-6 .thead,
   .table.table-6 .rowline {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .table.table-7 .thead,
+  .table.table-7 .rowline {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .table.table-8 .thead,
+  .table.table-8 .rowline {
     grid-template-columns: repeat(2, 1fr);
   }
 

@@ -2,6 +2,10 @@ import { useMemo, useState } from "react";
 import { useTable } from "../hooks/useTable";
 import { Material } from "../hooks/useWmsData";
 import { api } from "../api";
+import FieldLabel from "../components/FieldLabel";
+import FormModal from "../components/FormModal";
+import Toast from "../components/Toast";
+import { useToast } from "../hooks/useToast";
 
 type Props = {
   materials: Material[];
@@ -11,10 +15,21 @@ type Props = {
   onToggleInactive: (v: boolean) => void;
 };
 
+const MATERIAL_CATEGORIES = [
+  { value: "general", label: "通用物料" },
+  { value: "raw", label: "原材料" },
+  { value: "wip", label: "在制品" },
+  { value: "finished", label: "成品" },
+  { value: "pack", label: "包装耗材" },
+  { value: "tool", label: "工装器具" }
+];
+
 export default function Materials({ materials, onRefresh, can, includeInactive, onToggleInactive }: Props) {
   const [newMaterial, setNewMaterial] = useState({ sku: "", name: "", unit: "pcs", category: "general", is_common: 0 });
   const [editingId, setEditingId] = useState<number | null>(null);
   const [edit, setEdit] = useState({ sku: "", name: "", unit: "", category: "", is_common: 0, is_active: 1 });
+  const [showCreate, setShowCreate] = useState(false);
+  const { toast, showToast } = useToast();
 
   const table = useTable({
     rows: materials,
@@ -36,23 +51,44 @@ export default function Materials({ materials, onRefresh, can, includeInactive, 
             <input type="checkbox" checked={includeInactive} onChange={(e) => onToggleInactive(e.target.checked)} />
             显示已停用
           </label>
+          {can("materials.write") && <button className="primary" onClick={() => setShowCreate(true)}>新增物料</button>}
         </div>
       </div>
 
-      {can("materials.write") && (
-        <div className="form">
-          <input placeholder="SKU" value={newMaterial.sku} onChange={(e) => setNewMaterial({ ...newMaterial, sku: e.target.value })} />
-          <input placeholder="名称" value={newMaterial.name} onChange={(e) => setNewMaterial({ ...newMaterial, name: e.target.value })} />
-          <input placeholder="单位" value={newMaterial.unit} onChange={(e) => setNewMaterial({ ...newMaterial, unit: e.target.value })} />
-          <input placeholder="分类" value={newMaterial.category} onChange={(e) => setNewMaterial({ ...newMaterial, category: e.target.value })} />
-          <label className="row">
-            <input type="checkbox" checked={!!newMaterial.is_common} onChange={(e) => setNewMaterial({ ...newMaterial, is_common: e.target.checked ? 1 : 0 })} />
-            常用料
-          </label>
-          <button className="primary" onClick={async () => { await api.createMaterial(newMaterial); await onRefresh(); }}>
-            新增物料
-          </button>
-        </div>
+      <Toast toast={toast} />
+
+      {showCreate && (
+        <FormModal title="新增物料" onClose={() => setShowCreate(false)}>
+          <div className="form">
+            <FieldLabel text="SKU" />
+            <input value={newMaterial.sku} onChange={(e) => setNewMaterial({ ...newMaterial, sku: e.target.value })} />
+            <FieldLabel text="名称" />
+            <input value={newMaterial.name} onChange={(e) => setNewMaterial({ ...newMaterial, name: e.target.value })} />
+            <FieldLabel text="单位" />
+            <input value={newMaterial.unit} onChange={(e) => setNewMaterial({ ...newMaterial, unit: e.target.value })} />
+            <FieldLabel text="分类" />
+            <select value={newMaterial.category} onChange={(e) => setNewMaterial({ ...newMaterial, category: e.target.value })}>
+              {MATERIAL_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+            </select>
+            <label className="row">
+              <input type="checkbox" checked={!!newMaterial.is_common} onChange={(e) => setNewMaterial({ ...newMaterial, is_common: e.target.checked ? 1 : 0 })} />
+              常用料
+            </label>
+            <button className="primary" onClick={async () => {
+              try {
+                await api.createMaterial(newMaterial);
+                await onRefresh();
+                setNewMaterial({ sku: "", name: "", unit: "pcs", category: "general", is_common: 0 });
+                setShowCreate(false);
+                showToast("success", "物料新增成功");
+              } catch (e) {
+                showToast("error", (e as Error).message || "物料新增失败");
+              }
+            }}>
+              保存
+            </button>
+          </div>
+        </FormModal>
       )}
 
       <div className="toolbar">
@@ -79,59 +115,70 @@ export default function Materials({ materials, onRefresh, can, includeInactive, 
         </div>
         {table.pageItems.map((m) => (
           <div key={m.id} className="rowline">
-            {editingId === m.id ? (
-              <>
-                <span><input value={edit.sku} onChange={(e) => setEdit({ ...edit, sku: e.target.value })} /></span>
-                <span><input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></span>
-                <span><input value={edit.unit} onChange={(e) => setEdit({ ...edit, unit: e.target.value })} /></span>
-                <span><input value={edit.category} onChange={(e) => setEdit({ ...edit, category: e.target.value })} /></span>
-                <span>
-                  <label className="row">
-                    <input type="checkbox" checked={!!edit.is_active} onChange={(e) => setEdit({ ...edit, is_active: e.target.checked ? 1 : 0 })} />
-                    启用
-                  </label>
-                </span>
-                <span className="row">
-                  <label className="row">
-                    <input type="checkbox" checked={!!edit.is_common} onChange={(e) => setEdit({ ...edit, is_common: e.target.checked ? 1 : 0 })} />
-                    常用
-                  </label>
-                  <button className="primary" onClick={async () => { await api.updateMaterial(m.id, edit); setEditingId(null); await onRefresh(); }}>保存</button>
-                  <button onClick={() => setEditingId(null)}>取消</button>
-                </span>
-              </>
-            ) : (
-              <>
-                <span>{m.sku}</span>
-                <span>{m.name}</span>
-                <span>{m.unit}</span>
-                <span>{m.category}</span>
-                <span>{m.is_active ? "启用" : "停用"}</span>
-                <span className="row">
-                  {can("materials.write") && (
-                    <button onClick={() => { setEditingId(m.id); setEdit({ sku: m.sku, name: m.name, unit: m.unit, category: m.category, is_common: m.is_common, is_active: m.is_active }); }}>编辑</button>
-                  )}
-                  {can("materials.write") && (
-                    <button onClick={async () => { await api.setMaterialCommon(m.id, m.is_common ? 0 : 1); await onRefresh(); }}>
-                      {m.is_common ? "取消常用" : "设为常用"}
-                    </button>
-                  )}
-                  {can("materials.delete") && (
-                    <button onClick={async () => {
-                      const ok = window.confirm(`删除物料 ${m.sku} ? 如果有库存或订单将自动停用。`);
-                      if (!ok) return;
-                      const res = await api.deleteMaterial(m.id, 0) as any;
-                      if (res?.status === "soft_deleted") {
-                        alert(`已停用: ${res.reason}`);
-                      }
+            <span title={m.sku}>{editingId === m.id ? <input value={edit.sku} onChange={(e) => setEdit({ ...edit, sku: e.target.value })} /> : m.sku}</span>
+            <span title={m.name}>{editingId === m.id ? <input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /> : m.name}</span>
+            <span title={m.unit}>{editingId === m.id ? <input value={edit.unit} onChange={(e) => setEdit({ ...edit, unit: e.target.value })} /> : m.unit}</span>
+            <span title={m.category}>
+              {editingId === m.id
+                ? <select value={edit.category} onChange={(e) => setEdit({ ...edit, category: e.target.value })}>{MATERIAL_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}</select>
+                : (MATERIAL_CATEGORIES.find((c) => c.value === m.category)?.label || m.category)}
+            </span>
+            <span>{m.is_active ? "启用" : "停用"}</span>
+            <span className="row">
+              {can("materials.write") && (editingId === m.id ? (
+                <>
+                  <button className="primary" onClick={async () => {
+                    try {
+                      await api.updateMaterial(m.id, edit);
+                      setEditingId(null);
                       await onRefresh();
-                    }}>
-                      删除
-                    </button>
-                  )}
-                </span>
-              </>
-            )}
+                      showToast("success", "物料更新成功");
+                    } catch (e) {
+                      showToast("error", (e as Error).message || "物料更新失败");
+                    }
+                  }}>保存</button>
+                  <button onClick={() => setEditingId(null)}>取消</button>
+                </>
+              ) : (
+                <button onClick={() => {
+                  setEditingId(m.id);
+                  setEdit({
+                    sku: m.sku,
+                    name: m.name,
+                    unit: m.unit,
+                    category: m.category,
+                    is_common: m.is_common,
+                    is_active: m.is_active
+                  });
+                }}>编辑</button>
+              ))}
+              {can("materials.write") && (
+                <button onClick={async () => {
+                  try {
+                    await api.setMaterialCommon(m.id, m.is_common ? 0 : 1);
+                    await onRefresh();
+                    showToast("success", m.is_common ? "已取消常用料" : "已设为常用料");
+                  } catch (e) {
+                    showToast("error", (e as Error).message || "操作失败");
+                  }
+                }}>
+                  {m.is_common ? "取消常用" : "设为常用"}
+                </button>
+              )}
+              {can("materials.delete") && (
+                <button onClick={async () => {
+                  try {
+                    const res = await api.deleteMaterial(m.id, 0) as any;
+                    await onRefresh();
+                    showToast("success", res.status === "soft_deleted" ? "物料已停用" : "物料已删除");
+                  } catch (e) {
+                    showToast("error", (e as Error).message || "物料删除失败");
+                  }
+                }}>
+                  删除/停用
+                </button>
+              )}
+            </span>
           </div>
         ))}
       </div>

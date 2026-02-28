@@ -14,8 +14,19 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || res.statusText);
+    let msg = res.statusText;
+    try {
+      const data = await res.json();
+      if (Array.isArray(data?.detail)) {
+        msg = data.detail.map((item: any) => item?.msg || "").filter(Boolean).join("; ");
+      } else {
+        msg = data?.detail || data?.message || JSON.stringify(data);
+      }
+    } catch {
+      const text = await res.text();
+      msg = text || msg;
+    }
+    throw new Error(msg);
   }
   if (res.status === 204) return {} as T;
   return res.json();
@@ -35,7 +46,31 @@ export const api = {
   deleteRole: (id: number) => request(`/roles/${id}`, { method: "DELETE" }),
   setupDemo: () => request("/setup/demo", { method: "POST" }),
   listWarehouses: () => request("/warehouses"),
+  createWarehouse: (body: unknown) => request("/warehouses", { method: "POST", body: JSON.stringify(body) }),
+  updateWarehouse: (id: number, body: unknown) => request(`/warehouses/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteWarehouse: (id: number) => request(`/warehouses/${id}`, { method: "DELETE" }),
   listLocations: () => request("/locations"),
+  createLocation: (body: unknown) => request("/locations", { method: "POST", body: JSON.stringify(body) }),
+  updateLocation: (id: number, body: unknown) => request(`/locations/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteLocation: (id: number) => request(`/locations/${id}`, { method: "DELETE" }),
+  listFactories: () => request("/factories"),
+  createFactory: (body: unknown) => request("/factories", { method: "POST", body: JSON.stringify(body) }),
+  updateFactory: (id: number, body: unknown) => request(`/factories/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteFactory: (id: number) => request(`/factories/${id}`, { method: "DELETE" }),
+  listAreas: () => request("/areas"),
+  createArea: (body: unknown) => request("/areas", { method: "POST", body: JSON.stringify(body) }),
+  updateArea: (id: number, body: unknown) => request(`/areas/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteArea: (id: number) => request(`/areas/${id}`, { method: "DELETE" }),
+  listContainers: () => request("/containers"),
+  createContainer: (body: unknown) => request("/containers", { method: "POST", body: JSON.stringify(body) }),
+  updateContainer: (id: number, body: unknown) => request(`/containers/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteContainer: (id: number) => request(`/containers/${id}`, { method: "DELETE" }),
+  bindContainer: (id: number, location_id: number) => request(`/containers/${id}/bind`, { method: "POST", body: JSON.stringify({ location_id }) }),
+  unbindContainer: (id: number) => request(`/containers/${id}/unbind`, { method: "POST" }),
+  moveContainer: (id: number, to_location_id: number, note = "") => request(`/containers/${id}/move`, { method: "POST", body: JSON.stringify({ to_location_id, note }) }),
+  listContainerInventory: () => request("/container_inventory"),
+  adjustContainerStock: (id: number, body: unknown) => request(`/containers/${id}/stock/adjust`, { method: "POST", body: JSON.stringify(body) }),
+  listContainerMoves: () => request("/container_moves"),
   listMaterials: (include_inactive = 0) => request(`/materials?include_inactive=${include_inactive}`),
   createMaterial: (body: unknown) => request("/materials", { method: "POST", body: JSON.stringify(body) }),
   updateMaterial: (id: number, body: unknown) => request(`/materials/${id}`, { method: "PUT", body: JSON.stringify(body) }),
@@ -54,5 +89,6 @@ export const api = {
   shipOutbound: (id: number) => request(`/outbounds/${id}/ship`, { method: "POST", body: JSON.stringify({ ship_all: 1 }) }),
   listOrders: () => request("/orders"),
   listOrderLines: (id: number) => request(`/orders/${id}/lines`),
-  listStockMoves: () => request("/stock_moves")
+  listStockMoves: () => request("/stock_moves"),
+  listOperationLogs: () => request("/operation_logs")
 };
