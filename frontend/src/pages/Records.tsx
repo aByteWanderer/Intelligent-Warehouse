@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { OperationLog, StockMove } from "../hooks/useWmsData";
 import { useTable } from "../hooks/useTable";
 import { formatDateTime } from "../utils/time";
@@ -10,23 +11,38 @@ type Props = {
 };
 
 export default function RecordsPage({ stockMoves, operationLogs, materialName, locationName }: Props) {
+  const [moveTypeFilter, setMoveTypeFilter] = useState("all");
+  const [moveOperatorFilter, setMoveOperatorFilter] = useState("all");
+  const [opModuleFilter, setOpModuleFilter] = useState("all");
+  const [opActionFilter, setOpActionFilter] = useState("all");
+  const [opOperatorFilter, setOpOperatorFilter] = useState("all");
+
+  const moveRows = stockMoves
+    .filter((r) => moveTypeFilter === "all" ? true : r.move_type === moveTypeFilter)
+    .filter((r) => moveOperatorFilter === "all" ? true : (r.operator || "-") === moveOperatorFilter);
   const moveTable = useTable({
-    rows: stockMoves,
+    rows: moveRows,
     filter: (row, q) =>
       row.move_type.toLowerCase().includes(q) ||
       (row.operator || "").toLowerCase().includes(q) ||
       materialName(row.material_id).toLowerCase().includes(q) ||
       locationName(row.from_location_id).toLowerCase().includes(q) ||
-      locationName(row.to_location_id).toLowerCase().includes(q)
+      locationName(row.to_location_id).toLowerCase().includes(q),
+    stateKey: "rec_move"
   });
 
+  const opRows = operationLogs
+    .filter((r) => opModuleFilter === "all" ? true : r.module === opModuleFilter)
+    .filter((r) => opActionFilter === "all" ? true : r.action === opActionFilter)
+    .filter((r) => opOperatorFilter === "all" ? true : (r.operator || "-") === opOperatorFilter);
   const opTable = useTable({
-    rows: operationLogs,
+    rows: opRows,
     filter: (row, q) =>
       row.module.toLowerCase().includes(q) ||
       row.action.toLowerCase().includes(q) ||
       (row.operator || "").toLowerCase().includes(q) ||
-      row.detail.toLowerCase().includes(q)
+      row.detail.toLowerCase().includes(q),
+    stateKey: "rec_op"
   });
 
   return (
@@ -38,11 +54,21 @@ export default function RecordsPage({ stockMoves, operationLogs, materialName, l
         </div>
 
         <div className="toolbar">
-          <input
-            placeholder="搜索 类型 / 物料 / 库位 / 操作人"
-            value={moveTable.query}
-            onChange={(e) => { moveTable.setQuery(e.target.value); moveTable.reset(); }}
-          />
+          <div className="row">
+            <input
+              placeholder="搜索 类型 / 物料 / 库位 / 操作人"
+              value={moveTable.query}
+              onChange={(e) => { moveTable.setQuery(e.target.value); moveTable.reset(); }}
+            />
+            <select value={moveTypeFilter} onChange={(e) => { setMoveTypeFilter(e.target.value); moveTable.reset(); }}>
+              <option value="all">类型: 全部</option>
+              {[...new Set(stockMoves.map((m) => m.move_type))].map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select value={moveOperatorFilter} onChange={(e) => { setMoveOperatorFilter(e.target.value); moveTable.reset(); }}>
+              <option value="all">操作人: 全部</option>
+              {[...new Set(stockMoves.map((m) => m.operator || "-"))].map((u) => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
           <div className="pager">
             <button onClick={moveTable.prev} disabled={moveTable.page <= 1}>上一页</button>
             <span>{moveTable.page} / {moveTable.pageCount} | {moveTable.total} 条</span>
@@ -81,11 +107,25 @@ export default function RecordsPage({ stockMoves, operationLogs, materialName, l
         </div>
 
         <div className="toolbar">
-          <input
-            placeholder="搜索 模块 / 动作 / 操作人 / 详情"
-            value={opTable.query}
-            onChange={(e) => { opTable.setQuery(e.target.value); opTable.reset(); }}
-          />
+          <div className="row">
+            <input
+              placeholder="搜索 模块 / 动作 / 操作人 / 详情"
+              value={opTable.query}
+              onChange={(e) => { opTable.setQuery(e.target.value); opTable.reset(); }}
+            />
+            <select value={opModuleFilter} onChange={(e) => { setOpModuleFilter(e.target.value); opTable.reset(); }}>
+              <option value="all">模块: 全部</option>
+              {[...new Set(operationLogs.map((r) => r.module))].map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <select value={opActionFilter} onChange={(e) => { setOpActionFilter(e.target.value); opTable.reset(); }}>
+              <option value="all">动作: 全部</option>
+              {[...new Set(operationLogs.map((r) => r.action))].map((a) => <option key={a} value={a}>{a}</option>)}
+            </select>
+            <select value={opOperatorFilter} onChange={(e) => { setOpOperatorFilter(e.target.value); opTable.reset(); }}>
+              <option value="all">操作人: 全部</option>
+              {[...new Set(operationLogs.map((r) => r.operator || "-"))].map((u) => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
           <div className="pager">
             <button onClick={opTable.prev} disabled={opTable.page <= 1}>上一页</button>
             <span>{opTable.page} / {opTable.pageCount} | {opTable.total} 条</span>

@@ -57,6 +57,10 @@ def upgrade() -> None:
         op.add_column("locations", sa.Column("status", sa.String(length=32), server_default="ACTIVE", nullable=False))
     if _has_table(inspector, "locations") and not _has_column(inspector, "locations", "binding_status"):
         op.add_column("locations", sa.Column("binding_status", sa.String(length=32), server_default="UNBOUND", nullable=False))
+    if _has_table(inspector, "warehouses") and not _has_column(inspector, "warehouses", "factory_id"):
+        op.add_column("warehouses", sa.Column("factory_id", sa.Integer(), nullable=True))
+    if _has_table(inspector, "areas") and not _has_column(inspector, "areas", "warehouse_id"):
+        op.add_column("areas", sa.Column("warehouse_id", sa.Integer(), nullable=True))
 
     inspector = sa.inspect(bind)
     if _has_table(inspector, "operation_logs"):

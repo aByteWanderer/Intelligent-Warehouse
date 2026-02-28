@@ -6,6 +6,8 @@ import FieldLabel from "../components/FieldLabel";
 import FormModal from "../components/FormModal";
 import Toast from "../components/Toast";
 import { useToast } from "../hooks/useToast";
+import StatusBadge from "../components/StatusBadge";
+import { useLocalStorageState } from "../hooks/useLocalStorageState";
 
 type Props = {
   locations: Location[];
@@ -14,7 +16,7 @@ type Props = {
   onRefresh: () => void;
 };
 
-type TabKey = "warehouse" | "factory" | "area" | "location" | "container" | "container_stock" | "container_move";
+type TabKey = "factory" | "warehouse" | "area" | "location" | "layout" | "container" | "container_stock" | "container_move";
 
 const FACTORY_STATUS = ["ACTIVE", "DISABLED"] as const;
 const AREA_STATUS = ["ACTIVE", "DISABLED"] as const;
@@ -46,7 +48,7 @@ const CONTAINER_TYPES = [
 ];
 
 export default function StoragePage({ locations, materials, can, onRefresh }: Props) {
-  const [tab, setTab] = useState<TabKey>("warehouse");
+  const [tab, setTab] = useLocalStorageState<TabKey>("storage_tab", "factory");
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [factories, setFactories] = useState<any[]>([]);
   const [areas, setAreas] = useState<any[]>([]);
@@ -57,16 +59,16 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
   const { toast, showToast } = useToast();
   const [modal, setModal] = useState<null | "addWarehouse" | "addFactory" | "addArea" | "addLocation" | "addContainer">(null);
 
-  const [warehouseForm, setWarehouseForm] = useState({ code: "", name: "" });
+  const [warehouseForm, setWarehouseForm] = useState({ code: "", name: "", factory_id: 0 });
   const [factoryForm, setFactoryForm] = useState({ code: "", name: "", location: "", description: "", factory_type: "GENERAL", status: "ACTIVE" });
-  const [areaForm, setAreaForm] = useState({ code: "", name: "", material_type: "GENERAL", factory_id: 0, status: "ACTIVE", description: "" });
+  const [areaForm, setAreaForm] = useState({ code: "", name: "", material_type: "GENERAL", factory_id: 0, warehouse_id: 0, status: "ACTIVE", description: "" });
   const [locationForm, setLocationForm] = useState({ warehouse_id: 0, area_id: 0, code: "", name: "", status: "ACTIVE" });
-  const [containerForm, setContainerForm] = useState({ code: "", container_type: "BIN", status: "UNBOUND", location_id: 0, description: "" });
+  const [containerForm, setContainerForm] = useState({ code: "", container_type: "BIN", location_id: 0, description: "" });
   const [containerLocationQuery, setContainerLocationQuery] = useState("");
 
-  const [editWarehouse, setEditWarehouse] = useState<{ id: number; name: string } | null>(null);
+  const [editWarehouse, setEditWarehouse] = useState<{ id: number; name: string; factory_id: number } | null>(null);
   const [editFactory, setEditFactory] = useState<{ id: number; name: string; location: string; description: string; factory_type: string; status: string } | null>(null);
-  const [editArea, setEditArea] = useState<{ id: number; name: string; material_type: string; factory_id: number; status: string; description: string } | null>(null);
+  const [editArea, setEditArea] = useState<{ id: number; name: string; material_type: string; factory_id: number; warehouse_id: number; status: string; description: string } | null>(null);
   const [editLocation, setEditLocation] = useState<{ id: number; area_id: number; name: string; status: string } | null>(null);
   const [editContainer, setEditContainer] = useState<{ id: number; container_type: string; description: string; status: string } | null>(null);
 
@@ -104,10 +106,11 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
   }, [locations.length, materials.length]);
 
   const tabItems: { key: TabKey; label: string; visible: boolean }[] = [
-    { key: "warehouse", label: "仓库", visible: can("locations.read") || can("locations.write") },
     { key: "factory", label: "工厂", visible: can("areas.read") },
+    { key: "warehouse", label: "仓库", visible: can("locations.read") || can("locations.write") },
     { key: "area", label: "区域", visible: can("areas.read") },
     { key: "location", label: "库位", visible: can("locations.read") || can("locations.write") },
+    { key: "layout", label: "库位可视化", visible: can("locations.read") || can("containers.read") },
     { key: "container", label: "容器", visible: can("containers.read") || can("containers.write") },
     { key: "container_stock", label: "容器库存", visible: can("containers.read") || can("inventory.adjust") },
     { key: "container_move", label: "容器移动记录", visible: can("container_moves.read") }
@@ -141,10 +144,15 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
             <input value={warehouseForm.code} onChange={(e) => setWarehouseForm({ ...warehouseForm, code: e.target.value })} />
             <FieldLabel text="仓库名称" />
             <input value={warehouseForm.name} onChange={(e) => setWarehouseForm({ ...warehouseForm, name: e.target.value })} />
+            <FieldLabel text="所属工厂" />
+            <select value={warehouseForm.factory_id} onChange={(e) => setWarehouseForm({ ...warehouseForm, factory_id: Number(e.target.value) })}>
+              <option value={0}>无</option>
+              {factories.map((f) => <option key={f.id} value={f.id}>{f.code}</option>)}
+            </select>
             <button className="primary" onClick={async () => {
               try {
-                await api.createWarehouse({ code: warehouseForm.code, name: warehouseForm.name });
-                setWarehouseForm({ code: "", name: "" });
+                await api.createWarehouse({ code: warehouseForm.code, name: warehouseForm.name, factory_id: warehouseForm.factory_id || null });
+                setWarehouseForm({ code: "", name: "", factory_id: 0 });
                 setModal(null);
                 await load();
                 showToast("success", "仓库创建成功");
@@ -206,14 +214,25 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
               <option value={0}>无</option>
               {factories.map((f) => <option key={f.id} value={f.id}>{f.code}</option>)}
             </select>
+            <FieldLabel text="关联仓库" />
+            <select value={areaForm.warehouse_id} onChange={(e) => setAreaForm({ ...areaForm, warehouse_id: Number(e.target.value) })}>
+              <option value={0}>请选择</option>
+              {warehouses
+                .filter((w) => !areaForm.factory_id || !w.factory_id || w.factory_id === areaForm.factory_id)
+                .map((w) => <option key={w.id} value={w.id}>{w.code}</option>)}
+            </select>
             <FieldLabel text="状态" />
             <select value={areaForm.status} onChange={(e) => setAreaForm({ ...areaForm, status: e.target.value })}>
               {AREA_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
             </select>
             <button className="primary" onClick={async () => {
+              if (!areaForm.warehouse_id) {
+                showToast("error", "请选择关联仓库");
+                return;
+              }
               try {
                 await api.createArea({ ...areaForm, factory_id: areaForm.factory_id || null });
-                setAreaForm({ code: "", name: "", material_type: "GENERAL", factory_id: 0, status: "ACTIVE", description: "" });
+                setAreaForm({ code: "", name: "", material_type: "GENERAL", factory_id: 0, warehouse_id: 0, status: "ACTIVE", description: "" });
                 setModal(null);
                 await load();
                 showToast("success", "区域创建成功");
@@ -236,7 +255,9 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
             <FieldLabel text="区域" />
             <select value={locationForm.area_id} onChange={(e) => setLocationForm({ ...locationForm, area_id: Number(e.target.value) })}>
               <option value={0}>请选择区域</option>
-              {areas.map((a) => <option key={a.id} value={a.id}>{a.code}</option>)}
+              {areas
+                .filter((a) => !a.warehouse_id || a.warehouse_id === locationForm.warehouse_id)
+                .map((a) => <option key={a.id} value={a.id}>{a.code}</option>)}
             </select>
             <FieldLabel text="库位编号" />
             <input value={locationForm.code} onChange={(e) => setLocationForm({ ...locationForm, code: e.target.value })} />
@@ -285,10 +306,6 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
             <select value={containerForm.container_type} onChange={(e) => setContainerForm({ ...containerForm, container_type: e.target.value })}>
               {CONTAINER_TYPES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
             </select>
-            <FieldLabel text="状态" />
-            <select value={containerForm.status} onChange={(e) => setContainerForm({ ...containerForm, status: e.target.value })}>
-              {CONTAINER_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
-            </select>
             <FieldLabel text="绑定库位(可选)" />
             <input placeholder="搜索库位编码/名称" value={containerLocationQuery} onChange={(e) => setContainerLocationQuery(e.target.value)} />
             <select value={containerForm.location_id} onChange={(e) => setContainerForm({ ...containerForm, location_id: Number(e.target.value) })}>
@@ -304,11 +321,10 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
                 await api.createContainer({
                   code: containerForm.code,
                   container_type: containerForm.container_type,
-                  status: containerForm.status,
                   location_id: containerForm.location_id || null,
                   description: containerForm.description
                 });
-                setContainerForm({ code: "", container_type: "BIN", status: "UNBOUND", location_id: 0, description: "" });
+                setContainerForm({ code: "", container_type: "BIN", location_id: 0, description: "" });
                 setContainerLocationQuery("");
                 setModal(null);
                 await onRefresh();
@@ -323,21 +339,26 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
       )}
 
       {tab === "warehouse" && (can("locations.read") || can("locations.write")) && (
-        <div className="table table-4">
-          <div className="thead"><span>编码</span><span>名称</span><span>关联库位数</span><span>操作</span></div>
+        <div className="table table-5">
+          <div className="thead"><span>编码</span><span>名称</span><span>所属工厂</span><span>关联库位数</span><span>操作</span></div>
           {warehouses.map((w) => {
             const linkedCount = locations.filter((l) => l.warehouse_id === w.id).length;
             return (
               <div key={w.id} className="rowline">
                 <span>{w.code}</span>
                 <span>{editWarehouse?.id === w.id ? <input value={editWarehouse.name} onChange={(e) => setEditWarehouse({ ...editWarehouse, name: e.target.value })} /> : w.name}</span>
+                <span>
+                  {editWarehouse?.id === w.id
+                    ? <select value={editWarehouse.factory_id} onChange={(e) => setEditWarehouse({ ...editWarehouse, factory_id: Number(e.target.value) })}><option value={0}>无</option>{factories.map((f) => <option key={f.id} value={f.id}>{f.code}</option>)}</select>
+                    : (factories.find((f) => f.id === w.factory_id)?.code || "-")}
+                </span>
                 <span>{linkedCount}</span>
                 <span className="row">
                   {can("locations.write") && (editWarehouse?.id === w.id ? (
                     <>
                       <button className="primary" onClick={async () => {
                         try {
-                          await api.updateWarehouse(w.id, { name: editWarehouse.name });
+                          await api.updateWarehouse(w.id, { name: editWarehouse.name, factory_id: editWarehouse.factory_id || null });
                           setEditWarehouse(null);
                           await load();
                           showToast("success", "仓库更新成功");
@@ -347,7 +368,7 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
                       }}>保存</button>
                       <button onClick={() => setEditWarehouse(null)}>取消</button>
                     </>
-                  ) : <button onClick={() => setEditWarehouse({ id: w.id, name: w.name })}>编辑</button>)}
+                  ) : <button onClick={() => setEditWarehouse({ id: w.id, name: w.name, factory_id: w.factory_id || 0 })}>编辑</button>)}
                   {can("locations.write") && <button onClick={async () => {
                     try {
                       await api.deleteWarehouse(w.id);
@@ -377,7 +398,7 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
                   : (FACTORY_TYPES.find((t) => t.value === f.factory_type)?.label || f.factory_type || "-")}
               </span>
               <span>{editFactory?.id === f.id ? <input value={editFactory.location} onChange={(e) => setEditFactory({ ...editFactory, location: e.target.value })} /> : (f.location || "-")}</span>
-              <span>{editFactory?.id === f.id ? <select value={editFactory.status} onChange={(e) => setEditFactory({ ...editFactory, status: e.target.value })}>{FACTORY_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : (STATUS_LABEL[f.status] || f.status)}</span>
+              <span>{editFactory?.id === f.id ? <select value={editFactory.status} onChange={(e) => setEditFactory({ ...editFactory, status: e.target.value })}>{FACTORY_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : <StatusBadge value={f.status} />}</span>
               <span className="row">
                 {can("areas.write") && (editFactory?.id === f.id ? (
                   <>
@@ -410,21 +431,22 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
       )}
 
       {tab === "area" && can("areas.read") && (
-        <div className="table table-6">
-          <div className="thead"><span>编码</span><span>名称</span><span>物料类型</span><span>工厂</span><span>状态</span><span>操作</span></div>
+        <div className="table table-7">
+          <div className="thead"><span>编码</span><span>名称</span><span>物料类型</span><span>工厂</span><span>仓库</span><span>状态</span><span>操作</span></div>
           {areas.map((a) => (
             <div key={a.id} className="rowline">
               <span>{a.code}</span>
               <span>{editArea?.id === a.id ? <input value={editArea.name} onChange={(e) => setEditArea({ ...editArea, name: e.target.value })} /> : a.name}</span>
               <span>{editArea?.id === a.id ? <select value={editArea.material_type} onChange={(e) => setEditArea({ ...editArea, material_type: e.target.value })}>{AREA_MATERIAL_TYPES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}</select> : (AREA_MATERIAL_TYPES.find((t) => t.value === a.material_type)?.label || a.material_type || "-")}</span>
               <span>{editArea?.id === a.id ? <select value={editArea.factory_id} onChange={(e) => setEditArea({ ...editArea, factory_id: Number(e.target.value) })}><option value={0}>无</option>{factories.map((f) => <option key={f.id} value={f.id}>{f.code}</option>)}</select> : (factories.find((f) => f.id === a.factory_id)?.code || "-")}</span>
-              <span>{editArea?.id === a.id ? <select value={editArea.status} onChange={(e) => setEditArea({ ...editArea, status: e.target.value })}>{AREA_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : (STATUS_LABEL[a.status] || a.status)}</span>
+              <span>{editArea?.id === a.id ? <select value={editArea.warehouse_id} onChange={(e) => setEditArea({ ...editArea, warehouse_id: Number(e.target.value) })}><option value={0}>无</option>{warehouses.filter((w) => !editArea.factory_id || !w.factory_id || w.factory_id === editArea.factory_id).map((w) => <option key={w.id} value={w.id}>{w.code}</option>)}</select> : (warehouses.find((w) => w.id === a.warehouse_id)?.code || "-")}</span>
+              <span>{editArea?.id === a.id ? <select value={editArea.status} onChange={(e) => setEditArea({ ...editArea, status: e.target.value })}>{AREA_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : <StatusBadge value={a.status} />}</span>
               <span className="row">
                 {can("areas.write") && (editArea?.id === a.id ? (
                   <>
                     <button className="primary" onClick={async () => {
                       try {
-                        await api.updateArea(a.id, { ...editArea, factory_id: editArea.factory_id || null });
+                        await api.updateArea(a.id, { ...editArea, factory_id: editArea.factory_id || null, warehouse_id: editArea.warehouse_id || null });
                         setEditArea(null);
                         await load();
                         showToast("success", "区域更新成功");
@@ -434,7 +456,7 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
                     }}>保存</button>
                     <button onClick={() => setEditArea(null)}>取消</button>
                   </>
-                ) : <button onClick={() => setEditArea({ id: a.id, name: a.name, material_type: a.material_type || "GENERAL", factory_id: a.factory_id || 0, status: a.status || "ACTIVE", description: a.description || "" })}>编辑</button>)}
+                ) : <button onClick={() => setEditArea({ id: a.id, name: a.name, material_type: a.material_type || "GENERAL", factory_id: a.factory_id || 0, warehouse_id: a.warehouse_id || 0, status: a.status || "ACTIVE", description: a.description || "" })}>编辑</button>)}
                 {can("areas.write") && <button onClick={async () => {
                   try {
                     await api.deleteArea(a.id);
@@ -458,8 +480,8 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
               <span>{l.code}</span>
               <span>{editLocation?.id === l.id ? <input value={editLocation.name} onChange={(e) => setEditLocation({ ...editLocation, name: e.target.value })} /> : l.name}</span>
               <span>{editLocation?.id === l.id ? <select value={editLocation.area_id} onChange={(e) => setEditLocation({ ...editLocation, area_id: Number(e.target.value) })}><option value={0}>无</option>{areas.map((a) => <option key={a.id} value={a.id}>{a.code}</option>)}</select> : (areas.find((a) => a.id === (l as any).area_id)?.code || "-")}</span>
-              <span>{editLocation?.id === l.id ? <select value={editLocation.status} onChange={(e) => setEditLocation({ ...editLocation, status: e.target.value })}>{LOCATION_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : (STATUS_LABEL[(l as any).status || "ACTIVE"] || ((l as any).status || "ACTIVE"))}</span>
-              <span>{STATUS_LABEL[(l as any).binding_status || "UNBOUND"] || ((l as any).binding_status || "UNBOUND")}</span>
+              <span>{editLocation?.id === l.id ? <select value={editLocation.status} onChange={(e) => setEditLocation({ ...editLocation, status: e.target.value })}>{LOCATION_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : <StatusBadge value={(l as any).status || "ACTIVE"} />}</span>
+              <span><StatusBadge value={(l as any).binding_status || "UNBOUND"} /></span>
               <span className="row">
                 {can("locations.write") && (editLocation?.id === l.id ? (
                   <>
@@ -493,6 +515,48 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
         </div>
       )}
 
+      {tab === "layout" && (can("locations.read") || can("containers.read")) && (
+        <div className="grid">
+          {factories.map((f) => {
+            const wList = warehouses.filter((w) => !w.factory_id || w.factory_id === f.id);
+            return (
+              <div key={`layout-f-${f.id}`} className="card">
+                <h2>{f.code} - {f.name}</h2>
+                {wList.map((w) => {
+                  const aList = areas.filter((a) => !a.warehouse_id || a.warehouse_id === w.id);
+                  return (
+                    <div key={`layout-w-${w.id}`} className="card">
+                      <h2>仓库: {w.code}</h2>
+                      {aList.map((a) => {
+                        const lList = locations.filter((l) => (l as any).area_id === a.id);
+                        return (
+                          <div key={`layout-a-${a.id}`}>
+                            <div className="muted">区域: {a.code} ({a.name})</div>
+                            <div className="layout-grid">
+                              {lList.map((l) => {
+                                const c = containers.find((x) => x.location_id === l.id);
+                                return (
+                                  <div key={`layout-l-${l.id}`} className="layout-cell">
+                                    <div>{l.code}</div>
+                                    <div><StatusBadge value={(l as any).status || "ACTIVE"} /></div>
+                                    <div><StatusBadge value={(l as any).binding_status || "UNBOUND"} /></div>
+                                    <div className="muted">{c ? `容器:${c.code}` : "无容器"}</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {tab === "container" && (can("containers.read") || can("containers.write") || can("container_moves.write")) && (
         <div className="table table-7">
           <div className="thead"><span>编号</span><span>类型</span><span>状态</span><span>当前库位</span><span>绑定/移动</span><span>更新时间</span><span>操作</span></div>
@@ -500,7 +564,7 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
             <div key={c.id} className="rowline">
               <span>{c.code}</span>
               <span>{editContainer?.id === c.id ? <select value={editContainer.container_type} onChange={(e) => setEditContainer({ ...editContainer, container_type: e.target.value })}>{CONTAINER_TYPES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}</select> : (CONTAINER_TYPES.find((t) => t.value === c.container_type)?.label || c.container_type || "-")}</span>
-              <span>{editContainer?.id === c.id ? <select value={editContainer.status} onChange={(e) => setEditContainer({ ...editContainer, status: e.target.value })}>{CONTAINER_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : (STATUS_LABEL[c.status] || c.status)}</span>
+              <span>{editContainer?.id === c.id ? <select value={editContainer.status} onChange={(e) => setEditContainer({ ...editContainer, status: e.target.value })}>{CONTAINER_STATUS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select> : <StatusBadge value={c.status} />}</span>
               <span>{c.location_id ? (locationById.get(c.location_id)?.code || c.location_id) : "未绑定"}</span>
               <span className="row">
                 {can("containers.write") && !c.location_id && (
@@ -534,7 +598,7 @@ export default function StoragePage({ locations, materials, can, onRefresh }: Pr
                     }
                   }}>
                     <option value={0}>移动到库位</option>
-                    {locations.map((l) => <option key={l.id} value={l.id}>{l.code}</option>)}
+                    {locations.filter((l) => l.id !== c.location_id).map((l) => <option key={l.id} value={l.id}>{l.code}</option>)}
                   </select>
                 )}
               </span>

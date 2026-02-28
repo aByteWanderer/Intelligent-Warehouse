@@ -108,5 +108,6 @@ export const api = {
   listOrders: () => request("/orders"),
   listOrderLines: (id: number) => request(`/orders/${id}/lines`),
   listStockMoves: () => request("/stock_moves"),
-  listOperationLogs: () => request("/operation_logs")
+  listOperationLogs: () => request("/operation_logs"),
+  resetBusinessData: (body: { include_master_data: number }) => request("/setup/reset", { method: "POST", body: JSON.stringify(body) })
 };

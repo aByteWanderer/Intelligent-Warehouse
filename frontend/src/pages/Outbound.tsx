@@ -7,6 +7,9 @@ import FieldLabel from "../components/FieldLabel";
 import FormModal from "../components/FormModal";
 import Toast from "../components/Toast";
 import { useToast } from "../hooks/useToast";
+import StatusBadge from "../components/StatusBadge";
+import WorkflowBar from "../components/WorkflowBar";
+import EmptyState from "../components/EmptyState";
 
 type Props = {
   materials: Material[];
@@ -31,14 +34,23 @@ export default function OutboundPage({ materials, locations, orders, onRefresh, 
   const [form, setForm] = useState({ order_no: "", customer: "", source_location_id: 0, staging_location_id: 0, material_id: 0, qty: 1 });
   const [showCreate, setShowCreate] = useState(false);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [statusFilter, setStatusFilter] = useState<"all" | "CREATED" | "RESERVED" | "PICKED" | "PACKED" | "SHIPPED">("all");
+  const [creatorFilter, setCreatorFilter] = useState("all");
   const { toast, showToast } = useToast();
 
-  const outboundOrders = useMemo(() => orders.filter((o) => o.order_type === "outbound"), [orders]);
+  const outboundOrders = useMemo(
+    () => orders
+      .filter((o) => o.order_type === "outbound")
+      .filter((o) => statusFilter === "all" ? true : o.status === statusFilter)
+      .filter((o) => creatorFilter === "all" ? true : (o.created_by || "-") === creatorFilter),
+    [orders, statusFilter, creatorFilter]
+  );
   const defaultStagingId = form.staging_location_id || locations.find((l) => l.code === "STAGE")?.id || locations[0]?.id || 0;
 
   const table = useTable({
     rows: outboundOrders,
-    filter: (row, q) => row.order_no.toLowerCase().includes(q) || (row.partner ?? "").toLowerCase().includes(q)
+    filter: (row, q) => row.order_no.toLowerCase().includes(q) || (row.partner ?? "").toLowerCase().includes(q),
+    stateKey: "outb"
   });
 
   function nextAction(status: string) {
@@ -108,11 +120,27 @@ export default function OutboundPage({ materials, locations, orders, onRefresh, 
       )}
 
       <div className="toolbar">
-        <input
-          placeholder="搜索 单号 / 客户"
-          value={table.query}
-          onChange={(e) => { table.setQuery(e.target.value); table.reset(); }}
-        />
+        <div className="row">
+          <input
+            placeholder="搜索 单号 / 客户"
+            value={table.query}
+            onChange={(e) => { table.setQuery(e.target.value); table.reset(); }}
+          />
+          <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value as "all" | "CREATED" | "RESERVED" | "PICKED" | "PACKED" | "SHIPPED"); table.reset(); }}>
+            <option value="all">状态: 全部</option>
+            <option value="CREATED">状态: 已创建</option>
+            <option value="RESERVED">状态: 已预留</option>
+            <option value="PICKED">状态: 已分拣</option>
+            <option value="PACKED">状态: 已打包</option>
+            <option value="SHIPPED">状态: 已出库</option>
+          </select>
+          <select value={creatorFilter} onChange={(e) => { setCreatorFilter(e.target.value); table.reset(); }}>
+            <option value="all">创建人: 全部</option>
+            {[...new Set(orders.filter((o) => o.order_type === "outbound").map((o) => o.created_by || "-"))].map((u) => (
+              <option key={u} value={u}>{u}</option>
+            ))}
+          </select>
+        </div>
         <div className="pager">
           <button onClick={table.prev} disabled={table.page <= 1}>上一页</button>
           <span>{table.page} / {table.pageCount} | {table.total} 条</span>
@@ -134,8 +162,19 @@ export default function OutboundPage({ materials, locations, orders, onRefresh, 
           <Fragment key={o.id}>
             <div className="rowline">
               <span title={o.order_no}>{o.order_no}</span>
-              <span title={o.status}>{ORDER_STATUS_LABEL[o.status] || o.status}</span>
-              <span title={nextAction(o.status)}>{nextAction(o.status)}</span>
+              <span title={o.status}><StatusBadge value={o.status} /></span>
+              <span title={nextAction(o.status)}>
+                <WorkflowBar
+                  steps={["已创建", "已预留", "已分拣", "已打包", "已出库"]}
+                  current={ORDER_STATUS_LABEL[o.status] || "已创建"}
+                  doneSet={new Set(
+                    o.status === "SHIPPED" ? ["已创建", "已预留", "已分拣", "已打包", "已出库"] :
+                    o.status === "PACKED" ? ["已创建", "已预留", "已分拣", "已打包"] :
+                    o.status === "PICKED" ? ["已创建", "已预留", "已分拣"] :
+                    o.status === "RESERVED" ? ["已创建", "已预留"] : ["已创建"]
+                  )}
+                />
+              </span>
               <span title={o.partner ?? "-"}>{o.partner ?? "-"}</span>
               <span title={o.created_by ?? "-"}>{o.created_by ?? "-"}</span>
               <span title={o.created_at || "-"}>{o.created_at ? formatDateTime(o.created_at) : "-"}</span>
@@ -234,6 +273,7 @@ export default function OutboundPage({ materials, locations, orders, onRefresh, 
             )}
           </Fragment>
         ))}
+        {table.pageItems.length === 0 && <EmptyState title="暂无出库记录" subtitle="可先新建出库单后执行预留/分拣/打包/出库" />}
       </div>
     </section>
   );

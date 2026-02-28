@@ -7,6 +7,9 @@ import FieldLabel from "../components/FieldLabel";
 import FormModal from "../components/FormModal";
 import Toast from "../components/Toast";
 import { useToast } from "../hooks/useToast";
+import StatusBadge from "../components/StatusBadge";
+import WorkflowBar from "../components/WorkflowBar";
+import EmptyState from "../components/EmptyState";
 
 type Props = {
   materials: Material[];
@@ -19,22 +22,22 @@ type Props = {
   can: (perm: string) => boolean;
 };
 
-const ORDER_STATUS_LABEL: Record<string, string> = {
-  CREATED: "已创建",
-  RECEIVED: "已收货"
-};
-
 export default function InboundPage({ materials, locations, orders, onRefresh, loadLines, orderLines, materialName, can }: Props) {
   const [form, setForm] = useState({ order_no: "", supplier: "", location_id: 0, material_id: 0, qty: 1 });
   const [showCreate, setShowCreate] = useState(false);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  const [statusFilter, setStatusFilter] = useState<"all" | "CREATED" | "RECEIVED">("all");
+  const [creatorFilter, setCreatorFilter] = useState("all");
   const { toast, showToast } = useToast();
 
-  const inboundOrders = orders.filter((o) => o.order_type === "inbound");
+  const inboundOrders = orders.filter((o) => o.order_type === "inbound")
+    .filter((o) => statusFilter === "all" ? true : o.status === statusFilter)
+    .filter((o) => creatorFilter === "all" ? true : (o.created_by || "-") === creatorFilter);
 
   const table = useTable({
     rows: inboundOrders,
-    filter: (row, q) => row.order_no.toLowerCase().includes(q) || (row.partner ?? "").toLowerCase().includes(q)
+    filter: (row, q) => row.order_no.toLowerCase().includes(q) || (row.partner ?? "").toLowerCase().includes(q),
+    stateKey: "inb"
   });
 
   return (
@@ -89,11 +92,24 @@ export default function InboundPage({ materials, locations, orders, onRefresh, l
       )}
 
       <div className="toolbar">
-        <input
-          placeholder="搜索 单号 / 供应商"
-          value={table.query}
-          onChange={(e) => { table.setQuery(e.target.value); table.reset(); }}
-        />
+        <div className="row">
+          <input
+            placeholder="搜索 单号 / 供应商"
+            value={table.query}
+            onChange={(e) => { table.setQuery(e.target.value); table.reset(); }}
+          />
+          <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value as "all" | "CREATED" | "RECEIVED"); table.reset(); }}>
+            <option value="all">状态: 全部</option>
+            <option value="CREATED">状态: 已创建</option>
+            <option value="RECEIVED">状态: 已收货</option>
+          </select>
+          <select value={creatorFilter} onChange={(e) => { setCreatorFilter(e.target.value); table.reset(); }}>
+            <option value="all">创建人: 全部</option>
+            {[...new Set(orders.filter((o) => o.order_type === "inbound").map((o) => o.created_by || "-"))].map((u) => (
+              <option key={u} value={u}>{u}</option>
+            ))}
+          </select>
+        </div>
         <div className="pager">
           <button onClick={table.prev} disabled={table.page <= 1}>上一页</button>
           <span>{table.page} / {table.pageCount} | {table.total} 条</span>
@@ -114,11 +130,16 @@ export default function InboundPage({ materials, locations, orders, onRefresh, l
           <Fragment key={o.id}>
             <div className="rowline">
               <span title={o.order_no}>{o.order_no}</span>
-              <span title={o.status}>{ORDER_STATUS_LABEL[o.status] || o.status}</span>
+              <span title={o.status}><StatusBadge value={o.status} /></span>
               <span title={o.partner ?? "-"}>{o.partner ?? "-"}</span>
               <span title={o.created_by ?? "-"}>{o.created_by ?? "-"}</span>
               <span title={o.created_at || "-"}>{o.created_at ? formatDateTime(o.created_at) : "-"}</span>
               <span className="row">
+                <WorkflowBar
+                  steps={["已创建", "已收货"]}
+                  current={o.status === "RECEIVED" ? "已收货" : "已创建"}
+                  doneSet={new Set(o.status === "RECEIVED" ? ["已创建", "已收货"] : ["已创建"])}
+                />
                 {can("inbound.receive") && (
                   <button
                     disabled={o.status !== "CREATED"}
@@ -159,6 +180,7 @@ export default function InboundPage({ materials, locations, orders, onRefresh, l
             )}
           </Fragment>
         ))}
+        {table.pageItems.length === 0 && <EmptyState title="暂无入库记录" subtitle="可先新建入库单后操作收货" />}
       </div>
     </section>
   );

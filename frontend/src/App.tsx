@@ -71,7 +71,7 @@ export default function App() {
   }
 
   const navItems = useMemo(() => {
-    const items = [{ path: "/", label: "Dashboard" } as { path: string; label: string }];
+    const items = [{ path: "/", label: "总览" } as { path: string; label: string }];
     if (can("materials.read")) items.push({ path: "/materials", label: "物料" });
     if (can("inventory.read")) items.push({ path: "/inventory", label: "库存" });
     if (can("orders.read")) items.push({ path: "/inbound", label: "入库" }, { path: "/outbound", label: "出库" }, { path: "/orders", label: "订单" });
@@ -202,7 +202,12 @@ export default function App() {
       loading={data.loading}
       error={data.error}
       onRefresh={() => data.refreshAll(includeInactive ? 1 : 0, permissions)}
-      onInitDemo={async () => { await api.setupDemo(); await data.refreshAll(includeInactive ? 1 : 0, permissions); }}
+      canResetData={can("system.setup")}
+      onResetData={async () => {
+        if (!window.confirm("确认清空业务数据？将删除订单、库存、物料、仓库/区域/库位/容器等业务数据。")) return;
+        await api.resetBusinessData({ include_master_data: 1 });
+        await data.refreshAll(includeInactive ? 1 : 0, permissions);
+      }}
       activePath={path}
       user={user}
       onLogout={async () => { await api.logout(); localStorage.removeItem("wms_token"); setUser(null); setPermissions([]); }}

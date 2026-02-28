@@ -10,6 +10,7 @@ class Warehouse(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128))
+    factory_id: Mapped[int | None] = mapped_column(ForeignKey("factories.id"), nullable=True, index=True)
 
     locations: Mapped[list["Location"]] = relationship(back_populates="warehouse")
 
@@ -137,6 +138,7 @@ class Area(Base):
     name: Mapped[str] = mapped_column(String(128))
     material_type: Mapped[str] = mapped_column(String(64), default="GENERAL")
     factory_id: Mapped[int | None] = mapped_column(ForeignKey("factories.id"), nullable=True, index=True)
+    warehouse_id: Mapped[int | None] = mapped_column(ForeignKey("warehouses.id"), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="ACTIVE")
     description: Mapped[str] = mapped_column(String(256), default="")
 

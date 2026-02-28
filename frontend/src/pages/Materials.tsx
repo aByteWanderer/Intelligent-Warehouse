@@ -6,6 +6,8 @@ import FieldLabel from "../components/FieldLabel";
 import FormModal from "../components/FormModal";
 import Toast from "../components/Toast";
 import { useToast } from "../hooks/useToast";
+import { getHashParam, setHashParam } from "../utils/hashParams";
+import StatusBadge from "../components/StatusBadge";
 
 type Props = {
   materials: Material[];
@@ -29,14 +31,36 @@ export default function Materials({ materials, onRefresh, can, includeInactive, 
   const [editingId, setEditingId] = useState<number | null>(null);
   const [edit, setEdit] = useState({ sku: "", name: "", unit: "", category: "", is_common: 0, is_active: 1 });
   const [showCreate, setShowCreate] = useState(false);
+  const [commonFilter, setCommonFilterRaw] = useState<"all" | "common" | "non_common">(() => (getHashParam("mat_common", "all") as "all" | "common" | "non_common"));
+  const [categoryFilter, setCategoryFilterRaw] = useState(() => getHashParam("mat_cat", "all"));
   const { toast, showToast } = useToast();
 
+  function setCommonFilter(v: "all" | "common" | "non_common") {
+    setCommonFilterRaw(v);
+    setHashParam("mat_common", v === "all" ? null : v);
+  }
+
+  function setCategoryFilter(v: string) {
+    setCategoryFilterRaw(v);
+    setHashParam("mat_cat", v === "all" ? null : v);
+  }
+
+  const filteredMaterials = useMemo(() => {
+    return materials.filter((m) => {
+      if (commonFilter === "common" && !m.is_common) return false;
+      if (commonFilter === "non_common" && m.is_common) return false;
+      if (categoryFilter !== "all" && m.category !== categoryFilter) return false;
+      return true;
+    });
+  }, [materials, commonFilter, categoryFilter]);
+
   const table = useTable({
-    rows: materials,
+    rows: filteredMaterials,
     filter: (row, q) =>
       row.sku.toLowerCase().includes(q) ||
       row.name.toLowerCase().includes(q) ||
-      row.category.toLowerCase().includes(q)
+      row.category.toLowerCase().includes(q),
+    stateKey: "mat"
   });
 
   const commonCount = useMemo(() => materials.filter((m) => m.is_common).length, [materials]);
@@ -92,11 +116,22 @@ export default function Materials({ materials, onRefresh, can, includeInactive, 
       )}
 
       <div className="toolbar">
-        <input
-          placeholder="搜索 SKU / 名称 / 分类"
-          value={table.query}
-          onChange={(e) => { table.setQuery(e.target.value); table.reset(); }}
-        />
+        <div className="row">
+          <input
+            placeholder="搜索 SKU / 名称 / 分类"
+            value={table.query}
+            onChange={(e) => { table.setQuery(e.target.value); table.reset(); }}
+          />
+          <select value={commonFilter} onChange={(e) => { setCommonFilter(e.target.value as "all" | "common" | "non_common"); table.reset(); }}>
+            <option value="all">常用筛选: 全部</option>
+            <option value="common">常用筛选: 仅常用</option>
+            <option value="non_common">常用筛选: 仅非常用</option>
+          </select>
+          <select value={categoryFilter} onChange={(e) => { setCategoryFilter(e.target.value); table.reset(); }}>
+            <option value="all">分类筛选: 全部</option>
+            {MATERIAL_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+          </select>
+        </div>
         <div className="pager">
           <button onClick={table.prev} disabled={table.page <= 1}>上一页</button>
           <span>{table.page} / {table.pageCount} | {table.total} 条</span>
@@ -104,12 +139,13 @@ export default function Materials({ materials, onRefresh, can, includeInactive, 
         </div>
       </div>
 
-      <div className="table table-6">
+      <div className="table table-7">
         <div className="thead">
           <span>SKU</span>
           <span>名称</span>
           <span>单位</span>
           <span>分类</span>
+          <span>是否常用</span>
           <span>状态</span>
           <span>操作</span>
         </div>
@@ -123,7 +159,8 @@ export default function Materials({ materials, onRefresh, can, includeInactive, 
                 ? <select value={edit.category} onChange={(e) => setEdit({ ...edit, category: e.target.value })}>{MATERIAL_CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}</select>
                 : (MATERIAL_CATEGORIES.find((c) => c.value === m.category)?.label || m.category)}
             </span>
-            <span>{m.is_active ? "启用" : "停用"}</span>
+            <span>{m.is_common ? "是" : "否"}</span>
+            <span><StatusBadge value={m.is_active ? "ACTIVE" : "DISABLED"} /></span>
             <span className="row">
               {can("materials.write") && (editingId === m.id ? (
                 <>

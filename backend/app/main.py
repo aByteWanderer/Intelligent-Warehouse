@@ -82,6 +82,22 @@ def tx(db: Session):
     return db.begin() if not db.in_transaction() else nullcontext()
 
 
+def ensure_backward_compat_columns(db: Session):
+    # Compatibility bridge for environments not yet migrated by Alembic.
+    def has_column(table: str, column: str) -> bool:
+        rows = db.execute(text(f"PRAGMA table_info({table})")).fetchall()
+        return any(r[1] == column for r in rows)
+
+    try:
+        if not has_column("warehouses", "factory_id"):
+            db.execute(text("ALTER TABLE warehouses ADD COLUMN factory_id INTEGER"))
+        if not has_column("areas", "warehouse_id"):
+            db.execute(text("ALTER TABLE areas ADD COLUMN warehouse_id INTEGER"))
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
 def request_hash(payload: dict | None) -> str:
     normalized = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -362,6 +378,7 @@ def seed_permissions_and_admin(db: Session):
 def on_startup():
     with SessionLocal() as db:
         try:
+            ensure_backward_compat_columns(db)
             seed_permissions_and_admin(db)
             migrate_inventory_to_default_containers(db)
         except OperationalError as exc:
@@ -621,6 +638,7 @@ def delete_factory(
 
 @app.get("/areas")
 def list_areas(_: bool = Depends(require_permission("areas.read")), db: Session = Depends(get_db)):
+    ensure_backward_compat_columns(db)
     return db.scalars(select(models.Area)).all()
 
 
@@ -631,11 +649,18 @@ def create_area(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    ensure_backward_compat_columns(db)
+    wh = db.get(models.Warehouse, payload.warehouse_id)
+    if not wh:
+        raise HTTPException(400, "仓库不存在")
+    if payload.factory_id and wh.factory_id and payload.factory_id != wh.factory_id:
+        raise HTTPException(400, "区域所属工厂需与仓库所属工厂一致")
     area = models.Area(
         code=payload.code.strip(),
         name=payload.name,
         material_type=payload.material_type,
         factory_id=payload.factory_id,
+        warehouse_id=payload.warehouse_id,
         status=payload.status,
         description=payload.description,
     )
@@ -657,9 +682,20 @@ def update_area(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    ensure_backward_compat_columns(db)
     area = db.get(models.Area, area_id)
     if not area:
         raise HTTPException(404, "区域不存在")
+    if payload.warehouse_id:
+        wh = db.get(models.Warehouse, payload.warehouse_id)
+        if not wh:
+            raise HTTPException(400, "仓库不存在")
+        if payload.factory_id and wh.factory_id and payload.factory_id != wh.factory_id:
+            raise HTTPException(400, "区域所属工厂需与仓库所属工厂一致")
+    elif payload.factory_id and area.warehouse_id:
+        wh = db.get(models.Warehouse, area.warehouse_id)
+        if wh and wh.factory_id and payload.factory_id != wh.factory_id:
+            raise HTTPException(400, "区域所属工厂需与仓库所属工厂一致")
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(area, key, value)
     db.commit()
@@ -1033,14 +1069,64 @@ def setup_demo(
     return {"status": "ok"}
 
 
+@app.post("/setup/reset")
+def reset_business_data(
+    payload: schemas.ResetBusinessData,
+    _: bool = Depends(require_permission("system.setup")),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    table_order = [
+        "idempotency_records",
+        "container_moves",
+        "container_inventory",
+        "containers",
+        "stock_moves",
+        "inventory",
+        "order_lines",
+        "orders",
+        "operation_logs",
+    ]
+    if payload.include_master_data:
+        table_order.extend(["locations", "areas", "factories", "warehouses", "materials"])
+
+    deleted: dict[str, int] = {}
+    with tx(db):
+        for t in table_order:
+            try:
+                count = db.execute(text(f"SELECT COUNT(1) FROM {t}")).scalar() or 0
+                db.execute(text(f"DELETE FROM {t}"))
+                deleted[t] = int(count)
+            except OperationalError:
+                deleted[t] = 0
+    db.commit()
+    add_operation_log(
+        db,
+        "system",
+        "reset_business_data",
+        "system",
+        None,
+        f"include_master_data={payload.include_master_data}",
+        current_user,
+        after_value=deleted,
+    )
+    return {"status": "ok", "deleted": deleted}
+
+
 @app.get("/warehouses")
 def list_warehouses(_: bool = Depends(require_any_permission(["locations.read", "locations.write", "materials.read"])), db: Session = Depends(get_db)):
+    ensure_backward_compat_columns(db)
     return db.scalars(select(models.Warehouse)).all()
 
 
 @app.post("/warehouses")
 def create_warehouse(payload: schemas.WarehouseCreate, _: bool = Depends(require_any_permission(["locations.write", "materials.write"])), db: Session = Depends(get_db)):
-    wh = models.Warehouse(code=payload.code.strip(), name=payload.name)
+    ensure_backward_compat_columns(db)
+    if payload.factory_id:
+        factory = db.get(models.Factory, payload.factory_id)
+        if not factory:
+            raise HTTPException(400, "工厂不存在")
+    wh = models.Warehouse(code=payload.code.strip(), name=payload.name, factory_id=payload.factory_id)
     db.add(wh)
     try:
         db.commit()
@@ -1058,12 +1144,20 @@ def update_warehouse(
     _: bool = Depends(require_permission("locations.write")),
     db: Session = Depends(get_db),
 ):
+    ensure_backward_compat_columns(db)
     wh = db.get(models.Warehouse, warehouse_id)
     if not wh:
         raise HTTPException(404, "仓库不存在")
-    if payload.name is None:
+    if payload.name is None and payload.factory_id is None:
         raise HTTPException(400, "没有可更新字段")
-    wh.name = payload.name
+    if payload.factory_id:
+        factory = db.get(models.Factory, payload.factory_id)
+        if not factory:
+            raise HTTPException(400, "工厂不存在")
+    if payload.name is not None:
+        wh.name = payload.name
+    if payload.factory_id is not None:
+        wh.factory_id = payload.factory_id
     db.commit()
     db.refresh(wh)
     return wh
@@ -1093,12 +1187,15 @@ def list_locations(_: bool = Depends(require_any_permission(["locations.read", "
 
 @app.post("/locations")
 def create_location(payload: schemas.LocationCreate, _: bool = Depends(require_permission("locations.write")), db: Session = Depends(get_db)):
+    ensure_backward_compat_columns(db)
     warehouse = db.get(models.Warehouse, payload.warehouse_id)
     if not warehouse:
         raise HTTPException(400, "仓库不存在")
     area = db.get(models.Area, payload.area_id)
     if not area:
         raise HTTPException(400, "区域不存在")
+    if area.warehouse_id and area.warehouse_id != payload.warehouse_id:
+        raise HTTPException(400, "库位所属仓库需与区域所属仓库一致")
     exists = db.scalar(select(models.Location.id).where(models.Location.code == payload.code.strip()).limit(1))
     if exists:
         raise HTTPException(400, "库位编号已存在")
@@ -1504,6 +1601,8 @@ def create_outbound(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    if payload.staging_location_id and payload.staging_location_id == payload.source_location_id:
+        raise HTTPException(400, "拣货库位与暂存库位不能相同")
     replay, p_hash = replay_or_lock_idempotency(
         current_user.id,
         "POST",

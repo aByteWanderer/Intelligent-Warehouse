@@ -4,10 +4,12 @@ from pydantic import BaseModel, Field
 class WarehouseCreate(BaseModel):
     code: str
     name: str
+    factory_id: int | None = Field(default=None, gt=0)
 
 
 class WarehouseUpdate(BaseModel):
     name: str | None = None
+    factory_id: int | None = Field(default=None, gt=0)
 
 
 class LocationCreate(BaseModel):
@@ -82,6 +84,10 @@ class OutboundShip(BaseModel):
     ship_all: int = Field(1, ge=0, le=1)
 
 
+class ResetBusinessData(BaseModel):
+    include_master_data: int = Field(1, ge=0, le=1)
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -133,6 +139,7 @@ class AreaCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     material_type: str = "GENERAL"
     factory_id: int | None = Field(default=None, gt=0)
+    warehouse_id: int = Field(..., gt=0)
     status: str = Field("ACTIVE", pattern="^(ACTIVE|DISABLED)$")
     description: str = ""
 
@@ -141,6 +148,7 @@ class AreaUpdate(BaseModel):
     name: str | None = None
     material_type: str | None = None
     factory_id: int | None = Field(default=None, gt=0)
+    warehouse_id: int | None = Field(default=None, gt=0)
     status: str | None = Field(default=None, pattern="^(ACTIVE|DISABLED)$")
     description: str | None = None
 
