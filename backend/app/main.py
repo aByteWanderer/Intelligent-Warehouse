@@ -97,36 +97,9 @@ def replay_or_lock_idempotency(
     if not key:
         return None, None
     r_hash = request_hash(payload)
-    with SessionLocal() as idb:
-        existing = idb.scalar(
-            select(models.IdempotencyRecord).where(
-                models.IdempotencyRecord.user_id == user_id,
-                models.IdempotencyRecord.method == method,
-                models.IdempotencyRecord.path == path,
-                models.IdempotencyRecord.idempotency_key == key,
-            )
-        )
-        if existing:
-            if existing.request_hash != r_hash:
-                raise HTTPException(409, "幂等键已被用于不同请求")
-            if existing.status_code <= 0:
-                raise HTTPException(409, "请求处理中，请稍后重试")
-            return json.loads(existing.response_body or "{}"), None
-        rec = models.IdempotencyRecord(
-            user_id=user_id,
-            method=method,
-            path=path,
-            idempotency_key=key,
-            request_hash=r_hash,
-            status_code=0,
-            response_body=None,
-        )
-        idb.add(rec)
-        try:
-            idb.commit()
-        except IntegrityError:
-            idb.rollback()
-            raced = idb.scalar(
+    try:
+        with SessionLocal() as idb:
+            existing = idb.scalar(
                 select(models.IdempotencyRecord).where(
                     models.IdempotencyRecord.user_id == user_id,
                     models.IdempotencyRecord.method == method,
@@ -134,9 +107,40 @@ def replay_or_lock_idempotency(
                     models.IdempotencyRecord.idempotency_key == key,
                 )
             )
-            if raced and raced.request_hash == r_hash and raced.status_code > 0:
-                return json.loads(raced.response_body or "{}"), None
-            raise HTTPException(409, "重复请求，请稍后重试")
+            if existing:
+                if existing.request_hash != r_hash:
+                    raise HTTPException(409, "幂等键已被用于不同请求")
+                if existing.status_code <= 0:
+                    raise HTTPException(409, "请求处理中，请稍后重试")
+                return json.loads(existing.response_body or "{}"), None
+            rec = models.IdempotencyRecord(
+                user_id=user_id,
+                method=method,
+                path=path,
+                idempotency_key=key,
+                request_hash=r_hash,
+                status_code=0,
+                response_body=None,
+            )
+            idb.add(rec)
+            try:
+                idb.commit()
+            except IntegrityError:
+                idb.rollback()
+                raced = idb.scalar(
+                    select(models.IdempotencyRecord).where(
+                        models.IdempotencyRecord.user_id == user_id,
+                        models.IdempotencyRecord.method == method,
+                        models.IdempotencyRecord.path == path,
+                        models.IdempotencyRecord.idempotency_key == key,
+                    )
+                )
+                if raced and raced.request_hash == r_hash and raced.status_code > 0:
+                    return json.loads(raced.response_body or "{}"), None
+                raise HTTPException(409, "重复请求，请稍后重试")
+    except OperationalError:
+        # Backward compatibility: if migration hasn't created this table yet, skip idempotency.
+        return None, None
     return None, r_hash
 
 
@@ -150,39 +154,45 @@ def finalize_idempotency(
 ):
     if not key or not payload_hash:
         return
-    with SessionLocal() as idb:
-        rec = idb.scalar(
-            select(models.IdempotencyRecord).where(
-                models.IdempotencyRecord.user_id == user_id,
-                models.IdempotencyRecord.method == method,
-                models.IdempotencyRecord.path == path,
-                models.IdempotencyRecord.idempotency_key == key,
+    try:
+        with SessionLocal() as idb:
+            rec = idb.scalar(
+                select(models.IdempotencyRecord).where(
+                    models.IdempotencyRecord.user_id == user_id,
+                    models.IdempotencyRecord.method == method,
+                    models.IdempotencyRecord.path == path,
+                    models.IdempotencyRecord.idempotency_key == key,
+                )
             )
-        )
-        if not rec:
-            return
-        rec.request_hash = payload_hash
-        rec.status_code = 200
-        rec.response_body = json.dumps(response_body or {}, ensure_ascii=False)
-        idb.commit()
+            if not rec:
+                return
+            rec.request_hash = payload_hash
+            rec.status_code = 200
+            rec.response_body = json.dumps(response_body or {}, ensure_ascii=False)
+            idb.commit()
+    except OperationalError:
+        return
 
 
 def release_idempotency_lock(user_id: int, method: str, path: str, key: str | None):
     if not key:
         return
-    with SessionLocal() as idb:
-        rec = idb.scalar(
-            select(models.IdempotencyRecord).where(
-                models.IdempotencyRecord.user_id == user_id,
-                models.IdempotencyRecord.method == method,
-                models.IdempotencyRecord.path == path,
-                models.IdempotencyRecord.idempotency_key == key,
-                models.IdempotencyRecord.status_code == 0,
+    try:
+        with SessionLocal() as idb:
+            rec = idb.scalar(
+                select(models.IdempotencyRecord).where(
+                    models.IdempotencyRecord.user_id == user_id,
+                    models.IdempotencyRecord.method == method,
+                    models.IdempotencyRecord.path == path,
+                    models.IdempotencyRecord.idempotency_key == key,
+                    models.IdempotencyRecord.status_code == 0,
+                )
             )
-        )
-        if rec:
-            idb.delete(rec)
-            idb.commit()
+            if rec:
+                idb.delete(rec)
+                idb.commit()
+    except OperationalError:
+        return
 
 
 def hash_password(password: str, salt: str) -> str:
@@ -1877,4 +1887,30 @@ def list_stock_moves(_: bool = Depends(require_permission("stock_moves.read")), 
 
 @app.get("/operation_logs")
 def list_operation_logs(_: bool = Depends(require_permission("stock_moves.read")), db: Session = Depends(get_db)):
-    return db.scalars(select(models.OperationLog).order_by(models.OperationLog.id.desc())).all()
+    try:
+        return db.scalars(select(models.OperationLog).order_by(models.OperationLog.id.desc())).all()
+    except OperationalError:
+        # Backward compatibility with old schema before migration (missing new audit columns).
+        rows = db.execute(
+            text(
+                "SELECT id, module, action, entity, entity_id, detail, operator, created_at "
+                "FROM operation_logs ORDER BY id DESC"
+            )
+        ).mappings().all()
+        return [
+            {
+                "id": r["id"],
+                "module": r["module"],
+                "action": r["action"],
+                "entity": r["entity"],
+                "entity_id": r["entity_id"],
+                "detail": r["detail"],
+                "before_value": None,
+                "after_value": None,
+                "operator": r["operator"],
+                "request_source": None,
+                "trace_id": None,
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
