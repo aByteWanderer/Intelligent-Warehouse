@@ -1,16 +1,34 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+const idempotencyCache = new Map<string, { key: string; ts: number }>();
 
 function getToken() {
   return localStorage.getItem("wms_token");
 }
 
+function buildIdempotencyKey(method: string, path: string, body?: BodyInit | null) {
+  const signature = `${method}:${path}:${typeof body === "string" ? body : ""}`;
+  const now = Date.now();
+  const hit = idempotencyCache.get(signature);
+  if (hit && now - hit.ts < 5000) {
+    return hit.key;
+  }
+  const key = `${now}-${Math.random().toString(36).slice(2)}`;
+  idempotencyCache.set(signature, { key, ts: now });
+  return key;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const method = (options.method || "GET").toUpperCase();
+  const headers: Record<string, string> = { "Content-Type": "application/json", "X-Request-Source": "wms-web" };
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (method !== "GET") {
+    headers["Idempotency-Key"] = buildIdempotencyKey(method, path, options.body || null);
+  }
+  const optionHeaders = (options.headers || {}) as Record<string, string>;
 
   const res = await fetch(`${API_BASE}${path}`, {
-    headers,
+    headers: { ...headers, ...optionHeaders },
     ...options
   });
   if (!res.ok) {

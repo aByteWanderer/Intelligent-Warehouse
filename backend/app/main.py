@@ -1,13 +1,15 @@
 from datetime import datetime, timedelta
 import hashlib
+import json
 import secrets
+from contextvars import ContextVar
 from contextlib import nullcontext
-from fastapi import FastAPI, Depends, HTTPException, Response, Query, Header
+from fastapi import FastAPI, Depends, HTTPException, Response, Query, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
-from .db import Base, engine, SessionLocal
+from sqlalchemy.exc import IntegrityError, OperationalError
+from .db import SessionLocal
 from . import models, schemas
 
 app = FastAPI(title="WMS Intelligent Warehouse")
@@ -19,6 +21,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def audit_trace_middleware(request: Request, call_next):
+    trace_id = request.headers.get("X-Trace-Id") or secrets.token_hex(8)
+    request_source = request.headers.get("X-Request-Source")
+    if not request_source:
+        request_source = request.client.host if request.client else "unknown"
+    trace_id_ctx.set(trace_id)
+    request_source_ctx.set(request_source)
+    response = await call_next(request)
+    response.headers["X-Trace-Id"] = trace_id
+    return response
 
 
 PERMISSION_DESCRIPTIONS = {
@@ -50,6 +65,9 @@ PERMISSION_DESCRIPTIONS = {
     "container_moves.write": "容器移动操作",
 }
 
+trace_id_ctx: ContextVar[str | None] = ContextVar("trace_id", default=None)
+request_source_ctx: ContextVar[str | None] = ContextVar("request_source", default=None)
+
 
 def get_db():
     db = SessionLocal()
@@ -62,6 +80,109 @@ def get_db():
 def tx(db: Session):
     # SQLAlchemy 2.0 can auto-begin a transaction on reads; avoid nested begin() errors.
     return db.begin() if not db.in_transaction() else nullcontext()
+
+
+def request_hash(payload: dict | None) -> str:
+    normalized = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def replay_or_lock_idempotency(
+    user_id: int,
+    method: str,
+    path: str,
+    key: str | None,
+    payload: dict | None,
+):
+    if not key:
+        return None, None
+    r_hash = request_hash(payload)
+    with SessionLocal() as idb:
+        existing = idb.scalar(
+            select(models.IdempotencyRecord).where(
+                models.IdempotencyRecord.user_id == user_id,
+                models.IdempotencyRecord.method == method,
+                models.IdempotencyRecord.path == path,
+                models.IdempotencyRecord.idempotency_key == key,
+            )
+        )
+        if existing:
+            if existing.request_hash != r_hash:
+                raise HTTPException(409, "幂等键已被用于不同请求")
+            if existing.status_code <= 0:
+                raise HTTPException(409, "请求处理中，请稍后重试")
+            return json.loads(existing.response_body or "{}"), None
+        rec = models.IdempotencyRecord(
+            user_id=user_id,
+            method=method,
+            path=path,
+            idempotency_key=key,
+            request_hash=r_hash,
+            status_code=0,
+            response_body=None,
+        )
+        idb.add(rec)
+        try:
+            idb.commit()
+        except IntegrityError:
+            idb.rollback()
+            raced = idb.scalar(
+                select(models.IdempotencyRecord).where(
+                    models.IdempotencyRecord.user_id == user_id,
+                    models.IdempotencyRecord.method == method,
+                    models.IdempotencyRecord.path == path,
+                    models.IdempotencyRecord.idempotency_key == key,
+                )
+            )
+            if raced and raced.request_hash == r_hash and raced.status_code > 0:
+                return json.loads(raced.response_body or "{}"), None
+            raise HTTPException(409, "重复请求，请稍后重试")
+    return None, r_hash
+
+
+def finalize_idempotency(
+    user_id: int,
+    method: str,
+    path: str,
+    key: str | None,
+    payload_hash: str | None,
+    response_body: dict | None = None,
+):
+    if not key or not payload_hash:
+        return
+    with SessionLocal() as idb:
+        rec = idb.scalar(
+            select(models.IdempotencyRecord).where(
+                models.IdempotencyRecord.user_id == user_id,
+                models.IdempotencyRecord.method == method,
+                models.IdempotencyRecord.path == path,
+                models.IdempotencyRecord.idempotency_key == key,
+            )
+        )
+        if not rec:
+            return
+        rec.request_hash = payload_hash
+        rec.status_code = 200
+        rec.response_body = json.dumps(response_body or {}, ensure_ascii=False)
+        idb.commit()
+
+
+def release_idempotency_lock(user_id: int, method: str, path: str, key: str | None):
+    if not key:
+        return
+    with SessionLocal() as idb:
+        rec = idb.scalar(
+            select(models.IdempotencyRecord).where(
+                models.IdempotencyRecord.user_id == user_id,
+                models.IdempotencyRecord.method == method,
+                models.IdempotencyRecord.path == path,
+                models.IdempotencyRecord.idempotency_key == key,
+                models.IdempotencyRecord.status_code == 0,
+            )
+        )
+        if rec:
+            idb.delete(rec)
+            idb.commit()
 
 
 def hash_password(password: str, salt: str) -> str:
@@ -114,48 +235,6 @@ def require_any_permission(codes: list[str]):
     return checker
 
 
-def ensure_schema(db: Session):
-    Base.metadata.create_all(bind=engine)
-
-    def ensure_column(table: str, column: str, ddl: str):
-        cols = db.execute(text(f"PRAGMA table_info({table})")).fetchall()
-        col_names = {row[1] for row in cols}
-        if column not in col_names:
-            db.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
-
-    ensure_column("materials", "is_active", "is_active INTEGER DEFAULT 1")
-    ensure_column("order_lines", "material_sku", "material_sku VARCHAR(64)")
-    ensure_column("order_lines", "material_name", "material_name VARCHAR(128)")
-    ensure_column("orders", "created_by", "created_by VARCHAR(64)")
-    ensure_column("stock_moves", "operator", "operator VARCHAR(64)")
-    ensure_column("locations", "area_id", "area_id INTEGER")
-    ensure_column("locations", "status", "status VARCHAR(32) DEFAULT 'ACTIVE'")
-    ensure_column("locations", "binding_status", "binding_status VARCHAR(32) DEFAULT 'UNBOUND'")
-    db.execute(text(
-        "CREATE TABLE IF NOT EXISTS operation_logs ("
-        "id INTEGER PRIMARY KEY, "
-        "module VARCHAR(64), "
-        "action VARCHAR(64), "
-        "entity VARCHAR(64), "
-        "entity_id INTEGER, "
-        "detail VARCHAR(512), "
-        "operator VARCHAR(64), "
-        "created_at DATETIME)"
-    ))
-    db.execute(text("UPDATE materials SET is_active = 1 WHERE is_active IS NULL"))
-    db.execute(text("UPDATE locations SET status = 'ACTIVE' WHERE status IS NULL OR status = ''"))
-    db.execute(text("UPDATE locations SET binding_status = 'UNBOUND' WHERE binding_status IS NULL OR binding_status = ''"))
-    db.execute(text(
-        "UPDATE order_lines SET material_sku = (SELECT sku FROM materials WHERE materials.id = order_lines.material_id) "
-        "WHERE material_sku IS NULL"
-    ))
-    db.execute(text(
-        "UPDATE order_lines SET material_name = (SELECT name FROM materials WHERE materials.id = order_lines.material_id) "
-        "WHERE material_name IS NULL"
-    ))
-    db.commit()
-
-
 def migrate_inventory_to_default_containers(db: Session):
     existing_rows = db.scalar(select(models.ContainerInventory.id).limit(1))
     if existing_rows:
@@ -200,6 +279,8 @@ def add_operation_log(
     entity_id: int | None,
     detail: str = "",
     user: models.User | None = None,
+    before_value: dict | None = None,
+    after_value: dict | None = None,
 ):
     # Keep business APIs available even if audit log storage is temporarily broken.
     try:
@@ -211,7 +292,11 @@ def add_operation_log(
                     entity=entity,
                     entity_id=entity_id,
                     detail=detail,
+                    before_value=json.dumps(before_value, ensure_ascii=False) if before_value is not None else None,
+                    after_value=json.dumps(after_value, ensure_ascii=False) if after_value is not None else None,
                     operator=user.username if user else None,
+                    request_source=request_source_ctx.get(),
+                    trace_id=trace_id_ctx.get(),
                 )
             )
             log_db.commit()
@@ -266,9 +351,11 @@ def seed_permissions_and_admin(db: Session):
 @app.on_event("startup")
 def on_startup():
     with SessionLocal() as db:
-        ensure_schema(db)
-        seed_permissions_and_admin(db)
-        migrate_inventory_to_default_containers(db)
+        try:
+            seed_permissions_and_admin(db)
+            migrate_inventory_to_default_containers(db)
+        except OperationalError as exc:
+            raise RuntimeError("数据库结构未初始化，请先执行 Alembic 迁移：alembic upgrade head") from exc
 
 
 @app.get("/health")
@@ -819,60 +906,76 @@ def adjust_container_stock(
     payload: schemas.ContainerStockAdjust,
     _: bool = Depends(require_permission("inventory.adjust")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        f"/containers/{container_id}/stock/adjust",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     container = db.get(models.Container, container_id)
     if not container:
+        release_idempotency_lock(current_user.id, "POST", f"/containers/{container_id}/stock/adjust", idempotency_key)
         raise HTTPException(404, "容器不存在")
     if not container.location_id:
+        release_idempotency_lock(current_user.id, "POST", f"/containers/{container_id}/stock/adjust", idempotency_key)
         raise HTTPException(400, "容器未绑定库位，不能存放物料")
 
-    with tx(db):
-        row = db.scalar(
-            select(models.ContainerInventory)
-            .where(models.ContainerInventory.container_id == container_id)
-            .where(models.ContainerInventory.material_id == payload.material_id)
-        )
-        if not row:
-            row = models.ContainerInventory(container_id=container_id, material_id=payload.material_id, quantity=0, reserved=0, version=0)
-            db.add(row)
-            db.flush()
-        row.quantity += payload.delta
-        row.version += 1
-        if row.quantity < 0:
-            raise HTTPException(400, "容器库存不能小于0")
-
-        inv = db.scalar(
-            select(models.Inventory)
-            .where(models.Inventory.material_id == payload.material_id)
-            .where(models.Inventory.location_id == container.location_id)
-        )
-        if not inv:
-            inv = models.Inventory(
-                material_id=payload.material_id,
-                location_id=container.location_id,
-                quantity=0,
-                reserved=0,
-                version=0,
+    try:
+        with tx(db):
+            row = db.scalar(
+                select(models.ContainerInventory)
+                .where(models.ContainerInventory.container_id == container_id)
+                .where(models.ContainerInventory.material_id == payload.material_id)
             )
-            db.add(inv)
-            db.flush()
-        inv.quantity += payload.delta
-        inv.version += 1
-        if inv.quantity < 0:
-            raise HTTPException(400, "库位库存不能小于0")
+            if not row:
+                row = models.ContainerInventory(container_id=container_id, material_id=payload.material_id, quantity=0, reserved=0, version=0)
+                db.add(row)
+                db.flush()
+            row.quantity += payload.delta
+            row.version += 1
+            if row.quantity < 0:
+                raise HTTPException(400, "容器库存不能小于0")
 
-        db.add(
-            models.StockMove(
-                material_id=payload.material_id,
-                from_location_id=None,
-                to_location_id=container.location_id,
-                qty=payload.delta,
-                move_type=f"CONTAINER_ADJUST:{payload.reason}",
-                operator=current_user.username,
+            inv = db.scalar(
+                select(models.Inventory)
+                .where(models.Inventory.material_id == payload.material_id)
+                .where(models.Inventory.location_id == container.location_id)
             )
-        )
-    db.commit()
+            if not inv:
+                inv = models.Inventory(
+                    material_id=payload.material_id,
+                    location_id=container.location_id,
+                    quantity=0,
+                    reserved=0,
+                    version=0,
+                )
+                db.add(inv)
+                db.flush()
+            inv.quantity += payload.delta
+            inv.version += 1
+            if inv.quantity < 0:
+                raise HTTPException(400, "库位库存不能小于0")
+
+            db.add(
+                models.StockMove(
+                    material_id=payload.material_id,
+                    from_location_id=None,
+                    to_location_id=container.location_id,
+                    qty=payload.delta,
+                    move_type=f"CONTAINER_ADJUST:{payload.reason}",
+                    operator=current_user.username,
+                )
+            )
+        db.commit()
+    except Exception:
+        release_idempotency_lock(current_user.id, "POST", f"/containers/{container_id}/stock/adjust", idempotency_key)
+        raise
     add_operation_log(
         db,
         "containers",
@@ -881,8 +984,18 @@ def adjust_container_stock(
         container_id,
         f"material_id={payload.material_id},delta={payload.delta},reason={payload.reason}",
         current_user,
+        after_value={"container_id": container_id, "material_id": payload.material_id, "delta": payload.delta},
     )
-    return {"status": "ok"}
+    response = {"status": "ok"}
+    finalize_idempotency(
+        current_user.id,
+        "POST",
+        f"/containers/{container_id}/stock/adjust",
+        idempotency_key,
+        p_hash,
+        response,
+    )
+    return response
 
 
 @app.post("/setup/demo")
@@ -1168,52 +1281,72 @@ def adjust_inventory(
     payload: schemas.InventoryAdjust,
     _: bool = Depends(require_permission("inventory.adjust")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        "/inventory/adjust",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     bound_container = db.scalar(select(models.Container.id).where(models.Container.location_id == payload.location_id).limit(1))
     if bound_container:
+        release_idempotency_lock(current_user.id, "POST", "/inventory/adjust", idempotency_key)
         raise HTTPException(400, "该库位已绑定容器，请使用容器库存维护")
-    with tx(db):
-        inv = db.scalar(
-            select(models.Inventory)
-            .where(models.Inventory.material_id == payload.material_id)
-            .where(models.Inventory.location_id == payload.location_id)
-        )
-        if not inv:
-            inv = models.Inventory(
-                material_id=payload.material_id,
-                location_id=payload.location_id,
-                quantity=0,
-                reserved=0,
-                version=0,
+    try:
+        with tx(db):
+            inv = db.scalar(
+                select(models.Inventory)
+                .where(models.Inventory.material_id == payload.material_id)
+                .where(models.Inventory.location_id == payload.location_id)
             )
-            db.add(inv)
-            db.flush()
-        inv.quantity += payload.delta
-        inv.version += 1
-        if inv.quantity < 0:
-            raise HTTPException(400, "inventory cannot be negative")
-        db.add(
-            models.StockMove(
-                material_id=payload.material_id,
-                from_location_id=None,
-                to_location_id=payload.location_id,
-                qty=payload.delta,
-                move_type=f"ADJUST:{payload.reason}",
-                operator=current_user.username,
+            before_qty = inv.quantity if inv else 0
+            if not inv:
+                inv = models.Inventory(
+                    material_id=payload.material_id,
+                    location_id=payload.location_id,
+                    quantity=0,
+                    reserved=0,
+                    version=0,
+                )
+                db.add(inv)
+                db.flush()
+            inv.quantity += payload.delta
+            inv.version += 1
+            if inv.quantity < 0:
+                raise HTTPException(400, "inventory cannot be negative")
+            db.add(
+                models.StockMove(
+                    material_id=payload.material_id,
+                    from_location_id=None,
+                    to_location_id=payload.location_id,
+                    qty=payload.delta,
+                    move_type=f"ADJUST:{payload.reason}",
+                    operator=current_user.username,
+                )
             )
-        )
-        add_operation_log(
-            db,
-            "inventory",
-            "adjust",
-            "inventory",
-            inv.id,
-            f"material_id={payload.material_id},delta={payload.delta},reason={payload.reason}",
-            current_user,
-        )
-    db.commit()
-    return {"status": "ok"}
+            add_operation_log(
+                db,
+                "inventory",
+                "adjust",
+                "inventory",
+                inv.id,
+                f"material_id={payload.material_id},delta={payload.delta},reason={payload.reason}",
+                current_user,
+                before_value={"quantity": before_qty},
+                after_value={"quantity": inv.quantity},
+            )
+        db.commit()
+    except Exception:
+        release_idempotency_lock(current_user.id, "POST", "/inventory/adjust", idempotency_key)
+        raise
+    response = {"status": "ok"}
+    finalize_idempotency(current_user.id, "POST", "/inventory/adjust", idempotency_key, p_hash, response)
+    return response
 
 
 @app.post("/inbounds")
@@ -1221,8 +1354,18 @@ def create_inbound(
     payload: schemas.InboundCreate,
     _: bool = Depends(require_permission("orders.write")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        "/inbounds",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     try:
         with tx(db):
             order = models.Order(
@@ -1250,14 +1393,19 @@ def create_inbound(
         db.commit()
     except IntegrityError:
         db.rollback()
+        release_idempotency_lock(current_user.id, "POST", "/inbounds", idempotency_key)
         raise HTTPException(400, "入库单号已存在，请使用新的单号")
     except HTTPException:
         db.rollback()
+        release_idempotency_lock(current_user.id, "POST", "/inbounds", idempotency_key)
         raise
     except Exception:
         db.rollback()
+        release_idempotency_lock(current_user.id, "POST", "/inbounds", idempotency_key)
         raise
-    return {"order_id": order.id}
+    response = {"order_id": order.id}
+    finalize_idempotency(current_user.id, "POST", "/inbounds", idempotency_key, p_hash, response)
+    return response
 
 
 @app.post("/inbounds/{order_id}/receive")
@@ -1265,48 +1413,77 @@ def receive_inbound(
     order_id: int,
     _: bool = Depends(require_permission("inbound.receive")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        f"/inbounds/{order_id}/receive",
+        idempotency_key,
+        {},
+    )
+    if replay is not None:
+        return replay
     order = db.get(models.Order, order_id)
     if not order or order.order_type != "inbound":
+        release_idempotency_lock(current_user.id, "POST", f"/inbounds/{order_id}/receive", idempotency_key)
         raise HTTPException(404, "inbound not found")
     if order.status == "RECEIVED":
-        return {"status": "already"}
-    with tx(db):
-        lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
-        for line in lines:
-            inv = db.scalar(
-                select(models.Inventory)
-                .where(models.Inventory.material_id == line.material_id)
-                .where(models.Inventory.location_id == order.target_location_id)
-            )
-            if not inv:
-                inv = models.Inventory(
-                    material_id=line.material_id,
-                    location_id=order.target_location_id,
-                    quantity=0,
-                    reserved=0,
-                    version=0,
+        response = {"status": "already"}
+        finalize_idempotency(current_user.id, "POST", f"/inbounds/{order_id}/receive", idempotency_key, p_hash, response)
+        return response
+    try:
+        with tx(db):
+            lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
+            for line in lines:
+                inv = db.scalar(
+                    select(models.Inventory)
+                    .where(models.Inventory.material_id == line.material_id)
+                    .where(models.Inventory.location_id == order.target_location_id)
                 )
-                db.add(inv)
-                db.flush()
-            inv.quantity += line.qty
-            inv.version += 1
-            db.add(
-                models.StockMove(
-                    material_id=line.material_id,
-                    from_location_id=None,
-                    to_location_id=order.target_location_id,
-                    qty=line.qty,
-                    move_type="INBOUND_RECEIVE",
-                    operator=current_user.username,
-                    ref_id=order.id,
+                if not inv:
+                    inv = models.Inventory(
+                        material_id=line.material_id,
+                        location_id=order.target_location_id,
+                        quantity=0,
+                        reserved=0,
+                        version=0,
+                    )
+                    db.add(inv)
+                    db.flush()
+                inv.quantity += line.qty
+                inv.version += 1
+                db.add(
+                    models.StockMove(
+                        material_id=line.material_id,
+                        from_location_id=None,
+                        to_location_id=order.target_location_id,
+                        qty=line.qty,
+                        move_type="INBOUND_RECEIVE",
+                        operator=current_user.username,
+                        ref_id=order.id,
+                    )
                 )
+            order.status = "RECEIVED"
+            add_operation_log(
+                db,
+                "inbound",
+                "receive",
+                "order",
+                order.id,
+                f"order_no={order.order_no}",
+                current_user,
+                before_value={"status": "CREATED"},
+                after_value={"status": "RECEIVED"},
             )
-        order.status = "RECEIVED"
-        add_operation_log(db, "inbound", "receive", "order", order.id, f"order_no={order.order_no}", current_user)
-    db.commit()
-    return {"status": "ok"}
+        db.commit()
+    except Exception:
+        release_idempotency_lock(current_user.id, "POST", f"/inbounds/{order_id}/receive", idempotency_key)
+        raise
+    response = {"status": "ok"}
+    finalize_idempotency(current_user.id, "POST", f"/inbounds/{order_id}/receive", idempotency_key, p_hash, response)
+    return response
 
 
 @app.post("/outbounds")
@@ -1314,8 +1491,18 @@ def create_outbound(
     payload: schemas.OutboundCreate,
     _: bool = Depends(require_permission("orders.write")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        "/outbounds",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     try:
         with tx(db):
             order = models.Order(
@@ -1344,14 +1531,19 @@ def create_outbound(
         db.commit()
     except IntegrityError:
         db.rollback()
+        release_idempotency_lock(current_user.id, "POST", "/outbounds", idempotency_key)
         raise HTTPException(400, "出库单号已存在，请使用新的单号")
     except HTTPException:
         db.rollback()
+        release_idempotency_lock(current_user.id, "POST", "/outbounds", idempotency_key)
         raise
     except Exception:
         db.rollback()
+        release_idempotency_lock(current_user.id, "POST", "/outbounds", idempotency_key)
         raise
-    return {"order_id": order.id}
+    response = {"order_id": order.id}
+    finalize_idempotency(current_user.id, "POST", "/outbounds", idempotency_key, p_hash, response)
+    return response
 
 
 @app.post("/outbounds/{order_id}/reserve")
@@ -1360,46 +1552,74 @@ def reserve_outbound(
     payload: schemas.OutboundReserve,
     _: bool = Depends(require_permission("outbound.reserve")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        f"/outbounds/{order_id}/reserve",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     order = db.get(models.Order, order_id)
     if not order or order.order_type != "outbound":
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/reserve", idempotency_key)
         raise HTTPException(404, "出库单不存在")
     if order.status not in {"CREATED", "RESERVED"}:
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/reserve", idempotency_key)
         raise HTTPException(400, "当前状态不允许预留")
 
-    with tx(db):
-        lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
-        for line in lines:
-            inv = db.scalar(
-                select(models.Inventory)
-                .where(models.Inventory.material_id == line.material_id)
-                .where(models.Inventory.location_id == order.source_location_id)
-            )
-            if not inv:
-                raise HTTPException(400, "源库位无对应库存")
-            available = inv.quantity - inv.reserved
-            if available < line.qty and not payload.force:
-                raise HTTPException(400, "可用库存不足，无法预留")
-            reserve_qty = min(line.qty, available) if not payload.force else line.qty
-            inv.reserved += reserve_qty
-            inv.version += 1
-            line.reserved_qty = reserve_qty
-            db.add(
-                models.StockMove(
-                    material_id=line.material_id,
-                    from_location_id=order.source_location_id,
-                    to_location_id=order.source_location_id,
-                    qty=reserve_qty,
-                    move_type="OUTBOUND_RESERVE",
-                    operator=current_user.username,
-                    ref_id=order.id,
+    try:
+        with tx(db):
+            lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
+            for line in lines:
+                inv = db.scalar(
+                    select(models.Inventory)
+                    .where(models.Inventory.material_id == line.material_id)
+                    .where(models.Inventory.location_id == order.source_location_id)
                 )
+                if not inv:
+                    raise HTTPException(400, "源库位无对应库存")
+                available = inv.quantity - inv.reserved
+                if available < line.qty and not payload.force:
+                    raise HTTPException(400, "可用库存不足，无法预留")
+                reserve_qty = min(line.qty, available) if not payload.force else line.qty
+                inv.reserved += reserve_qty
+                inv.version += 1
+                line.reserved_qty = reserve_qty
+                db.add(
+                    models.StockMove(
+                        material_id=line.material_id,
+                        from_location_id=order.source_location_id,
+                        to_location_id=order.source_location_id,
+                        qty=reserve_qty,
+                        move_type="OUTBOUND_RESERVE",
+                        operator=current_user.username,
+                        ref_id=order.id,
+                    )
+                )
+            order.status = "RESERVED"
+            add_operation_log(
+                db,
+                "outbound",
+                "reserve",
+                "order",
+                order.id,
+                f"order_no={order.order_no}",
+                current_user,
+                before_value={"status": "CREATED"},
+                after_value={"status": "RESERVED"},
             )
-        order.status = "RESERVED"
-        add_operation_log(db, "outbound", "reserve", "order", order.id, f"order_no={order.order_no}", current_user)
-    db.commit()
-    return {"status": "ok"}
+        db.commit()
+    except Exception:
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/reserve", idempotency_key)
+        raise
+    response = {"status": "ok"}
+    finalize_idempotency(current_user.id, "POST", f"/outbounds/{order_id}/reserve", idempotency_key, p_hash, response)
+    return response
 
 
 @app.post("/outbounds/{order_id}/pick")
@@ -1408,62 +1628,90 @@ def pick_outbound(
     payload: schemas.OutboundPick,
     _: bool = Depends(require_permission("outbound.pick")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        f"/outbounds/{order_id}/pick",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     order = db.get(models.Order, order_id)
     if not order or order.order_type != "outbound":
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/pick", idempotency_key)
         raise HTTPException(404, "出库单不存在")
     if order.status != "RESERVED":
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/pick", idempotency_key)
         raise HTTPException(400, "当前状态不允许分拣")
 
-    with tx(db):
-        lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
-        for line in lines:
-            inv = db.scalar(
-                select(models.Inventory)
-                .where(models.Inventory.material_id == line.material_id)
-                .where(models.Inventory.location_id == order.source_location_id)
-            )
-            if not inv or inv.reserved < line.reserved_qty:
-                raise HTTPException(400, "预留库存不足，无法分拣")
-            inv.reserved -= line.reserved_qty
-            inv.version += 1
-            line.picked_qty = line.reserved_qty
-
-            staging_inv = db.scalar(
-                select(models.Inventory)
-                .where(models.Inventory.material_id == line.material_id)
-                .where(models.Inventory.location_id == payload.staging_location_id)
-            )
-            if not staging_inv:
-                staging_inv = models.Inventory(
-                    material_id=line.material_id,
-                    location_id=payload.staging_location_id,
-                    quantity=0,
-                    reserved=0,
-                    version=0,
+    try:
+        with tx(db):
+            lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
+            for line in lines:
+                inv = db.scalar(
+                    select(models.Inventory)
+                    .where(models.Inventory.material_id == line.material_id)
+                    .where(models.Inventory.location_id == order.source_location_id)
                 )
-                db.add(staging_inv)
-                db.flush()
-            staging_inv.quantity += line.reserved_qty
-            staging_inv.version += 1
+                if not inv or inv.reserved < line.reserved_qty:
+                    raise HTTPException(400, "预留库存不足，无法分拣")
+                inv.reserved -= line.reserved_qty
+                inv.version += 1
+                line.picked_qty = line.reserved_qty
 
-            db.add(
-                models.StockMove(
-                    material_id=line.material_id,
-                    from_location_id=order.source_location_id,
-                    to_location_id=payload.staging_location_id,
-                    qty=line.reserved_qty,
-                    move_type="OUTBOUND_PICK",
-                    operator=current_user.username,
-                    ref_id=order.id,
+                staging_inv = db.scalar(
+                    select(models.Inventory)
+                    .where(models.Inventory.material_id == line.material_id)
+                    .where(models.Inventory.location_id == payload.staging_location_id)
                 )
+                if not staging_inv:
+                    staging_inv = models.Inventory(
+                        material_id=line.material_id,
+                        location_id=payload.staging_location_id,
+                        quantity=0,
+                        reserved=0,
+                        version=0,
+                    )
+                    db.add(staging_inv)
+                    db.flush()
+                staging_inv.quantity += line.reserved_qty
+                staging_inv.version += 1
+
+                db.add(
+                    models.StockMove(
+                        material_id=line.material_id,
+                        from_location_id=order.source_location_id,
+                        to_location_id=payload.staging_location_id,
+                        qty=line.reserved_qty,
+                        move_type="OUTBOUND_PICK",
+                        operator=current_user.username,
+                        ref_id=order.id,
+                    )
+                )
+            order.status = "PICKED"
+            order.target_location_id = payload.staging_location_id
+            add_operation_log(
+                db,
+                "outbound",
+                "pick",
+                "order",
+                order.id,
+                f"order_no={order.order_no}",
+                current_user,
+                before_value={"status": "RESERVED"},
+                after_value={"status": "PICKED"},
             )
-        order.status = "PICKED"
-        order.target_location_id = payload.staging_location_id
-        add_operation_log(db, "outbound", "pick", "order", order.id, f"order_no={order.order_no}", current_user)
-    db.commit()
-    return {"status": "ok"}
+        db.commit()
+    except Exception:
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/pick", idempotency_key)
+        raise
+    response = {"status": "ok"}
+    finalize_idempotency(current_user.id, "POST", f"/outbounds/{order_id}/pick", idempotency_key, p_hash, response)
+    return response
 
 
 @app.post("/outbounds/{order_id}/pack")
@@ -1472,23 +1720,51 @@ def pack_outbound(
     payload: schemas.OutboundPack,
     _: bool = Depends(require_permission("outbound.pack")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        f"/outbounds/{order_id}/pack",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     order = db.get(models.Order, order_id)
     if not order or order.order_type != "outbound":
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/pack", idempotency_key)
         raise HTTPException(404, "出库单不存在")
     if order.status != "PICKED":
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/pack", idempotency_key)
         raise HTTPException(400, "当前状态不允许打包")
 
-    with tx(db):
-        lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
-        for line in lines:
-            if payload.pack_all:
-                line.packed_qty = line.picked_qty
-        order.status = "PACKED"
-        add_operation_log(db, "outbound", "pack", "order", order.id, f"order_no={order.order_no}", current_user)
-    db.commit()
-    return {"status": "ok"}
+    try:
+        with tx(db):
+            lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
+            for line in lines:
+                if payload.pack_all:
+                    line.packed_qty = line.picked_qty
+            order.status = "PACKED"
+            add_operation_log(
+                db,
+                "outbound",
+                "pack",
+                "order",
+                order.id,
+                f"order_no={order.order_no}",
+                current_user,
+                before_value={"status": "PICKED"},
+                after_value={"status": "PACKED"},
+            )
+        db.commit()
+    except Exception:
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/pack", idempotency_key)
+        raise
+    response = {"status": "ok"}
+    finalize_idempotency(current_user.id, "POST", f"/outbounds/{order_id}/pack", idempotency_key, p_hash, response)
+    return response
 
 
 @app.post("/outbounds/{order_id}/ship")
@@ -1497,44 +1773,73 @@ def ship_outbound(
     payload: schemas.OutboundShip,
     _: bool = Depends(require_permission("outbound.ship")),
     current_user: models.User = Depends(get_current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
 ):
+    replay, p_hash = replay_or_lock_idempotency(
+        current_user.id,
+        "POST",
+        f"/outbounds/{order_id}/ship",
+        idempotency_key,
+        payload.model_dump(),
+    )
+    if replay is not None:
+        return replay
     order = db.get(models.Order, order_id)
     if not order or order.order_type != "outbound":
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/ship", idempotency_key)
         raise HTTPException(404, "出库单不存在")
     if order.status != "PACKED":
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/ship", idempotency_key)
         raise HTTPException(400, "当前状态不允许出库")
     if not order.target_location_id:
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/ship", idempotency_key)
         raise HTTPException(400, "缺少暂存库位")
 
-    with tx(db):
-        lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
-        for line in lines:
-            qty = line.packed_qty if payload.ship_all else line.packed_qty
-            inv = db.scalar(
-                select(models.Inventory)
-                .where(models.Inventory.material_id == line.material_id)
-                .where(models.Inventory.location_id == order.target_location_id)
-            )
-            if not inv or inv.quantity < qty:
-                raise HTTPException(400, "暂存库位库存不足")
-            inv.quantity -= qty
-            inv.version += 1
-            db.add(
-                models.StockMove(
-                    material_id=line.material_id,
-                    from_location_id=order.target_location_id,
-                    to_location_id=None,
-                    qty=qty,
-                    move_type="OUTBOUND_SHIP",
-                    operator=current_user.username,
-                    ref_id=order.id,
+    try:
+        with tx(db):
+            lines = db.scalars(select(models.OrderLine).where(models.OrderLine.order_id == order_id)).all()
+            for line in lines:
+                qty = line.packed_qty if payload.ship_all else line.packed_qty
+                inv = db.scalar(
+                    select(models.Inventory)
+                    .where(models.Inventory.material_id == line.material_id)
+                    .where(models.Inventory.location_id == order.target_location_id)
                 )
+                if not inv or inv.quantity < qty:
+                    raise HTTPException(400, "暂存库位库存不足")
+                inv.quantity -= qty
+                inv.version += 1
+                db.add(
+                    models.StockMove(
+                        material_id=line.material_id,
+                        from_location_id=order.target_location_id,
+                        to_location_id=None,
+                        qty=qty,
+                        move_type="OUTBOUND_SHIP",
+                        operator=current_user.username,
+                        ref_id=order.id,
+                    )
+                )
+            order.status = "SHIPPED"
+            add_operation_log(
+                db,
+                "outbound",
+                "ship",
+                "order",
+                order.id,
+                f"order_no={order.order_no}",
+                current_user,
+                before_value={"status": "PACKED"},
+                after_value={"status": "SHIPPED"},
             )
-        order.status = "SHIPPED"
-        add_operation_log(db, "outbound", "ship", "order", order.id, f"order_no={order.order_no}", current_user)
-    db.commit()
-    return {"status": "ok"}
+        db.commit()
+    except Exception:
+        release_idempotency_lock(current_user.id, "POST", f"/outbounds/{order_id}/ship", idempotency_key)
+        raise
+    response = {"status": "ok"}
+    finalize_idempotency(current_user.id, "POST", f"/outbounds/{order_id}/ship", idempotency_key, p_hash, response)
+    return response
 
 
 @app.get("/orders")

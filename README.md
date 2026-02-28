@@ -3,7 +3,7 @@
 This is a minimal full-stack WMS with inbound, outbound, inventory, materials, common materials, orders, picking, packing, and inventory consistency via transactional updates + stock ledger.
 
 ## Stack
-- Backend: FastAPI + SQLAlchemy + SQLite
+- Backend: FastAPI + SQLAlchemy + Alembic + SQLite
 - Frontend: React + Vite
 
 ## Database
@@ -21,8 +21,17 @@ cd /home/alishan/wms/backend
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
+alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
+
+## DB migration (Alembic)
+```bash
+cd /home/alishan/wms/backend
+. .venv/bin/activate
+alembic upgrade head
+```
+If startup reports schema not initialized, run migration first.
 
 ## Run frontend
 ```bash
@@ -51,4 +60,6 @@ Some browser plugins request `CLodopfuncs.js`. The backend now serves an empty s
 - All inventory mutations happen inside SQL transactions.
 - Inventory rows use `version` for optimistic updates.
 - Every change writes a `stock_moves` record.
+- Critical write APIs support `Idempotency-Key` for anti-replay.
+- Operation logs now include before/after values, request source, and trace id.
 - SQLite is used for simplicity; for real concurrency use Postgres (row-level locks).
